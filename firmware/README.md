@@ -1,9 +1,10 @@
 # ESP32-C6 sensor firmware
 
 This PlatformIO project samples one MT6701 over I²C and sends one UDP sample
-datagram per 1 ms sampling tick when Wi-Fi is connected. All nodes use the same
-firmware. The Wi-Fi station MAC carried in each packet identifies the node;
-the Rust server assigns its logical sensor name from its own configuration.
+datagram per 1 ms sampling tick when Wi-Fi is connected. Version 2 packets
+include clock-sync metadata; all nodes use the same firmware. The Wi-Fi station
+MAC carried in each packet identifies the node; the Rust server assigns its
+logical sensor name from its own configuration.
 
 ## Wiring
 
@@ -55,10 +56,13 @@ In ESP-IDF Wi-Fi logs, `authmode:0x3` means WPA2-PSK. The cipher value `0x3`
 means TKIP, which is deprecated; configure the AP for WPA2-Personal with
 AES/CCMP where possible.
 
-At startup, the firmware prints the compiled UDP destination. The periodic
-`send errors` count is for local `sendto` failures only; `last send errno`
-helps diagnose those failures. It does not confirm remote delivery. Use server
-sequence gaps to observe samples not received by the server.
+At startup, the firmware prints the compiled UDP destination. It sends a
+four-timestamp clock-sync request about once per second and includes the
+estimated server clock offset and sync round-trip time in each version 2 sample.
+The periodic `send errors` count is for sample `sendto` failures;
+`sync send errors` counts time-sync request failures. Neither confirms remote
+delivery. Use server sequence gaps to observe samples not received by the
+server.
 
 `pio run -t menuconfig` edits the generated full configuration. To keep local
 changes in the small ignored file, edit `sdkconfig.local` as the source of
@@ -80,6 +84,10 @@ still run.
 - A bounded queue separates acquisition from the nonblocking UDP sender. If
   Wi-Fi is down, the queue is cleared and acquisition continues. Sequence
   numbers therefore expose outages and local transmit drops to the receiver.
+- The sample timestamp is taken immediately before the MT6701 I²C read.
+  Latency starts at this timestamp; firmware does not model or subtract
+  MT6701 internal measurement delay. Clock offset is refreshed through the
+  server's UDP time-sync exchange.
 - The sampler reports an estimated rate and counts for I²C errors, missed timer
   slots, full-queue drops, and samples taken while Wi-Fi is unavailable every
   five seconds.

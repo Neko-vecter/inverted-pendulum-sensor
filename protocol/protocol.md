@@ -1,7 +1,7 @@
-# Sensor UDP Protocol, Version 1
+# Sensor UDP Protocol, Version 2
 
-This document defines the sample datagrams sent by each ESP32-C6 sensor node.
-It is the wire contract between the firmware and the Rust sensor server.
+This document defines the UDP sample and time-synchronization datagrams between
+each ESP32-C6 sensor node and the Rust Sensor Server.
 
 ## Transport
 
@@ -10,107 +10,169 @@ It is the wire contract between the firmware and the Rust sensor server.
 | Network | Wi-Fi station |
 | Transport | UDP over IPv4 |
 | Destination | Server IPv4 and UDP port from firmware configuration |
-| Default destination port | `5000` |
+| Default destination port | 5000 |
 | Sample target | 1,000 datagrams per second per node |
-| Datagram payload | Exactly 26 bytes |
+| Version 1 sample payload | 26 bytes; accepted for compatibility, no latency estimate |
+| Version 2 sample payload | 46 bytes |
 | Byte order | Big-endian for multi-byte integers |
 | Retransmission | None |
 
-Every datagram contains one sample record. UDP delivery is best effort. The
-firmware uses a bounded queue between sampling and transmission; queue overflow,
-network outages, and UDP loss can produce sequence gaps.
+Version 2 sends one sample datagram per sampling slot and a small time-sync
+request/response about once per second. UDP remains best effort. Queue overflow
+and Wi-Fi outages can produce sequence gaps; samples are not replayed afterward.
 
-## Sample frame
+## Common header
 
-The packet is encoded field-by-field. It is not a native C structure and has no
+Every datagram begins with this four-byte header:
+
+| Offset | Length | Field | Encoding |
+|---:|---:|---|---|
+| 0 | 2 | magic | Unsigned 16-bit big-endian; 0x4950 (IP) |
+| 2 | 1 | version | Protocol version: 1 or 2 |
+| 3 | 1 | packet_type | Sample 0x01, time-sync request 0x02, response 0x03 |
+
+Version 1 defines only 26-byte sample datagrams. Version 2 defines 46-byte
+sample datagrams and the time-sync messages below. Receivers reject unknown
+magic, versions, packet types, and lengths.
+
+## Version 2 sample frame
+
+The packet is encoded field by field; it is not a native C structure and has no
 compiler-dependent padding.
 
 | Offset | Length | Field | Encoding |
 |---:|---:|---|---|
-| 0 | 2 | `magic` | Unsigned 16-bit big-endian; value `0x4950` (`"IP"`) |
-| 2 | 1 | `version` | Unsigned 8-bit; value `1` |
-| 3 | 1 | `packet_type` | Unsigned 8-bit; sample value `0x01` |
-| 4 | 6 | `device_mac` | Raw Wi-Fi station MAC octets, in display order |
-| 10 | 4 | `sequence` | Unsigned 32-bit big-endian |
-| 14 | 8 | `timestamp_us` | Unsigned 64-bit big-endian |
-| 22 | 2 | `raw_angle` | Unsigned 16-bit big-endian; valid values are 0 through 16,383 |
-| 24 | 1 | `status` | Status bit field, defined below |
-| 25 | 1 | `reserved` | Must be zero; receiver should ignore its value in version 1 |
+| 0 | 2 | magic | 0x4950 |
+| 2 | 1 | version | 2 |
+| 3 | 1 | packet_type | Sample 0x01 |
+| 4 | 6 | device_mac | Raw Wi-Fi station MAC octets, display order |
+| 10 | 4 | sequence | Unsigned 32-bit big-endian |
+| 14 | 8 | timestamp_us | ESP32 monotonic microseconds at start of MT6701 I2C read |
+| 22 | 2 | raw_angle | Unsigned 16-bit; valid range 0–16,383 |
+| 24 | 1 | status | Status field described below |
+| 25 | 1 | reserved | Zero; receiver ignores it |
+| 26 | 8 | sync_session_id | Server session identifier; zero means unsynchronized |
+| 34 | 8 | clock_offset_us | Signed 64-bit two's complement; server clock minus device clock |
+| 42 | 4 | sync_round_trip_us | Round-trip time from the latest accepted sync exchange |
 
-Total payload length is **26 bytes**. A version 1 receiver should reject
-datagrams with a different length, unknown magic, unsupported version, or
-unknown packet type.
+Total version 2 sample length is **46 bytes**. The sample timestamp remains in
+the device's monotonic clock domain. The server uses the supplied offset to map
+it into the current server session's monotonic clock domain.
 
-### Device identity and server mapping
+### Device identity and mapping
 
-`device_mac` is the six-byte Wi-Fi station MAC read from the ESP32-C6. For
-example, the displayed MAC `AA:BB:CC:DD:EE:FF` is transmitted as bytes
-`AA BB CC DD EE FF`. The MAC is included in the payload because an IP/UDP
-receiver cannot use the original Wi-Fi link-layer source MAC to identify a node
-after packets pass through an access point and IP network.
+device_mac is the six-byte Wi-Fi station MAC read from the ESP32-C6. For
+example, AA:BB:CC:DD:EE:FF is transmitted as AA BB CC DD EE FF. The MAC is
+inside the payload because an IP receiver cannot use the original Wi-Fi link
+source MAC after packets pass through an access point.
 
-The ESP32-C6 firmware does not assign a numeric `device_id`. The server maps
-`device_mac` to its configured logical sensor name or role. This mapping is a
-server-side configuration-file concern; it does not require a downlink packet
-or a different firmware image for each node. The server should treat an
-unmapped MAC as an unknown device according to its own policy.
+The firmware has no per-node numeric ID. The server maps each MAC to a logical
+sensor name or role in its configuration file. Unknown MAC addresses are
+counted and are not assigned to a configured device.
 
 ### Sequence
 
-`sequence` starts at zero for the first sampling task wake after boot and
+sequence starts at zero for the first sampling task wake after boot and
 advances for each subsequent 1 ms sampling slot, including slots whose sample
-is not transmitted. It wraps modulo 2³². Samples omitted while the network is
-disconnected, while the sampling task is late, or when the local transmit queue
-is full therefore appear as gaps between received records. A reboot resets the
-counter; the receiver can also use the MAC and timestamp to distinguish a
-restart from ordinary packet loss.
+is not transmitted. It wraps modulo 2^32. Samples omitted during a Wi-Fi outage,
+when the sampler is late, or when the local queue is full appear as gaps. The
+server's loss estimate cannot distinguish network loss from samples the
+firmware omitted before transmission.
 
-### Timestamp
+### Timestamp and latency
 
-`timestamp_us` is the ESP32-C6 monotonic time in microseconds at the start of
-the MT6701 read. It is local to one boot and is not synchronized with other
-nodes or the server. It is encoded as an unsigned 64-bit value; the server
-should not interpret it as Unix time.
+timestamp_us is esp_timer_get_time() in microseconds, captured immediately
+before the firmware starts the MT6701 I2C read. It is monotonic, local to that
+ESP32 boot, and is not a Unix timestamp. The latency metric starts at this
+timestamp and does not model or subtract MT6701 internal measurement delay.
+
+For a synchronized sample whose sync_session_id matches the server's current
+session, the server estimates sample-to-receive latency as:
+
+    latency_us = server_receive_monotonic_us
+               - (timestamp_us + clock_offset_us)
+
+server_receive_monotonic_us is captured when the server's recv_from call
+returns. This measures from the firmware timestamp point through I2C
+acquisition, firmware queueing, UDP/Wi-Fi delivery, and server receive
+scheduling. Clock-offset error and path asymmetry limit one-way latency
+accuracy. Samples without a valid current-session offset, or with a negative
+computed latency, are excluded from percentiles and counted separately.
+
+The server reports P50, P75, P90, and P99 per configured device and statistics
+interval, using the nearest-rank percentile definition. It retains at most
+50,000 latency samples per device per interval; larger intervals use a bounded
+reservoir sample, while the log reports both the total and retained sample
+counts. Version 1 samples have no sync metadata and do not contribute to
+latency percentiles.
 
 ### Angle and status
 
-The MT6701 provides a 14-bit absolute angle. The firmware reads register
-`0x03` first and `0x04` second, then combines `Angle[13:6]` from the first byte
-with `Angle[5:0]` from bits 7 through 2 of the second byte. The transmitted
-integer is in the range 0–16,383. Convert it to degrees as:
+The MT6701 provides a 14-bit absolute angle. The firmware reads register 0x03
+then 0x04, and combines Angle[13:6] from the first byte with Angle[5:0] from
+bits 7 through 2 of the second byte. Convert the transmitted integer to degrees:
 
-```text
-degrees = raw_angle * 360.0 / 16384.0
-```
-
-The `status` bits in version 1 are:
+    degrees = raw_angle * 360.0 / 16384.0
 
 | Bit | Mask | Meaning |
 |---:|---:|---|
-| 0 | `0x01` | Angle is valid (`1` when both I²C register reads succeeded) |
-| 1 | `0x02` | MT6701 I²C read failed |
-| 2–7 | — | Reserved; transmitted as zero |
+| 0 | 0x01 | Angle valid; both I2C reads succeeded |
+| 1 | 0x02 | MT6701 I2C read failed |
+| 2–7 | — | Reserved; zero |
 
-The sender emits exactly `0x01` when both I²C register reads succeed and
-exactly `0x02` when either read fails. For `status = 0x01`, `raw_angle` is in
-the range 0–16,383. For `status = 0x02`, `raw_angle` is `0xFFFF`. A version 1
-receiver should reject any other `status` value, including values with
-reserved bits set or both defined bits set. It must use the valid status bit
-and must not interpret `0xFFFF` as an angle.
+The sender emits exactly 0x01 on success and 0x02 on an I2C failure. For
+status 0x01, raw_angle is 0–16,383. For status 0x02, raw_angle is 0xFFFF.
+Receivers reject other status values, including both defined bits being set.
 
-## Example datagram
+## Time synchronization messages
 
-This sample has MAC `AA:BB:CC:DD:EE:FF`, sequence `0x01020304`, monotonic
-timestamp `1,000,000` µs, angle `0x2A10`, and a valid sensor reading:
+The device and server exchange four timestamps over the same configured UDP
+port. Only MAC addresses present in the server's device mapping receive a
+response.
 
-```text
-49 50 01 01 AA BB CC DD EE FF 01 02 03 04
-00 00 00 00 00 0F 42 40 2A 10 01 00
-```
+### Request: device to server
 
-## Versioning and scope
+| Offset | Length | Field | Encoding |
+|---:|---:|---|---|
+| 0 | 4 | Common header | Version 2, type 0x02 |
+| 4 | 6 | device_mac | Raw station MAC octets |
+| 10 | 4 | sync_sequence | Unsigned 32-bit big-endian |
+| 14 | 8 | device_t1_us | Device monotonic time captured immediately before request encoding/send |
 
-The protocol version is the byte at offset 2. A future incompatible frame
-change must use a new version. Version 1 only defines ESP32-C6-to-server sample
-datagrams; it defines no acknowledgements, server commands, remote
-configuration, or clock synchronization.
+Total request length is **22 bytes**.
+
+### Response: server to device
+
+| Offset | Length | Field | Encoding |
+|---:|---:|---|---|
+| 0 | 4 | Common header | Version 2, type 0x03 |
+| 4 | 6 | device_mac | Echoed station MAC |
+| 10 | 4 | sync_sequence | Echoed request sequence |
+| 14 | 8 | device_t1_us | Echoed device timestamp |
+| 22 | 8 | server_t2_us | Server monotonic time when request was received |
+| 30 | 8 | server_t3_us | Server monotonic time captured immediately before response encoding/send |
+| 38 | 8 | server_session_id | Nonzero ID that changes when the server process restarts |
+
+Total response length is **46 bytes**. On receipt of the matching response, the
+device records device_t4_us from its monotonic clock and estimates:
+
+    round_trip_us = (device_t4_us - device_t1_us) - (server_t3_us - server_t2_us)
+    clock_offset_us = ((server_t2_us - device_t1_us)
+                     + (server_t3_us - device_t4_us)) / 2
+
+The offset convention is server clock minus device clock; adding it to
+timestamp_us maps the sample into server time. Firmware refreshes synchronization
+periodically and marks it unavailable after responses become stale. A zero
+session ID means the sample is unsynchronized. After server restart, the session
+ID changes, preventing an old offset from producing valid-looking latency data.
+
+## Version 1 compatibility
+
+The server accepts version 1 sample datagrams of exactly 26 bytes with the
+original fields and offsets. Version 1 timestamps are device-local monotonic
+values and are not latency-measured. New firmware sends version 2.
+
+## Scope
+
+The protocol defines sample reports and time synchronization only. It has no
+acknowledgements, remote configuration, or start/stop commands.

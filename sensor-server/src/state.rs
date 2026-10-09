@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 const MAX_REPORTED_UNKNOWN_MACS: usize = 32;
+const MAX_LATENCY_PERCENTILE_SAMPLES: usize = 50_000;
 
 #[derive(Debug)]
 pub struct DeviceState {
@@ -18,6 +19,11 @@ pub struct DeviceState {
     pub out_of_order: u64,
     pub restarts: u64,
     pub sensor_errors: u64,
+    pub latency_samples_us: Vec<u64>,
+    pub latency_total_samples: u64,
+    pub latency_unsynced: u64,
+    pub latency_clock_ahead: u64,
+    pub latest_sync_rtt_us: Option<u32>,
     last_sequence: Option<u32>,
     last_timestamp_us: Option<u64>,
 }
@@ -43,17 +49,29 @@ impl DeviceState {
             out_of_order: 0,
             restarts: 0,
             sensor_errors: 0,
+            latency_samples_us: Vec::new(),
+            latency_total_samples: 0,
+            latency_unsynced: 0,
+            latency_clock_ahead: 0,
+            latest_sync_rtt_us: None,
             last_sequence: None,
             last_timestamp_us: None,
         }
     }
 
-    fn record(&mut self, sample: SensorSample, received_at: Instant) {
+    fn record(
+        &mut self,
+        sample: SensorSample,
+        received_at: Instant,
+        server_now_us: u64,
+        server_session_id: u64,
+    ) {
         self.received_total += 1;
         self.interval_received += 1;
         if sample.has_i2c_error() {
             self.sensor_errors += 1;
         }
+        self.record_latency(sample, server_now_us, server_session_id);
 
         let mut advances_sequence = false;
         let mut is_restart = false;
@@ -109,8 +127,54 @@ impl DeviceState {
         }
     }
 
+    fn record_latency(
+        &mut self,
+        sample: SensorSample,
+        server_now_us: u64,
+        server_session_id: u64,
+    ) {
+        let Some(sync) = sample.clock_sync else {
+            self.latency_unsynced += 1;
+            return;
+        };
+        if sync.session_id != server_session_id {
+            self.latency_unsynced += 1;
+            return;
+        }
+
+        self.latest_sync_rtt_us = Some(sync.round_trip_us);
+        let estimated_sample_server_us = i128::from(sample.timestamp_us)
+            + i128::from(sync.offset_us);
+        let latency_us = i128::from(server_now_us) - estimated_sample_server_us;
+        if latency_us < 0 {
+            self.latency_clock_ahead += 1;
+        } else if let Ok(latency_us) = u64::try_from(latency_us) {
+            self.latency_total_samples += 1;
+            if self.latency_samples_us.len() < MAX_LATENCY_PERCENTILE_SAMPLES {
+                self.latency_samples_us.push(latency_us);
+            } else {
+                let slot = reservoir_index(self.latency_total_samples);
+                if slot < MAX_LATENCY_PERCENTILE_SAMPLES as u64 {
+                    self.latency_samples_us[slot as usize] = latency_us;
+                }
+            }
+        } else {
+            self.latency_clock_ahead += 1;
+        }
+    }
+
     pub fn take_interval_received(&mut self) -> u64 {
         std::mem::take(&mut self.interval_received)
+    }
+
+    pub fn take_latency_interval(&mut self) -> LatencyInterval {
+        LatencyInterval {
+            samples_us: std::mem::take(&mut self.latency_samples_us),
+            total_samples: std::mem::take(&mut self.latency_total_samples),
+            unsynced: std::mem::take(&mut self.latency_unsynced),
+            clock_ahead: std::mem::take(&mut self.latency_clock_ahead),
+            latest_sync_rtt_us: self.latest_sync_rtt_us,
+        }
     }
 
     pub fn loss_percent(&self) -> Option<f64> {
@@ -137,17 +201,63 @@ impl DeviceRegistry {
         }
     }
 
-    pub fn record(&mut self, sample: SensorSample, received_at: Instant) -> bool {
+    pub fn record(
+        &mut self,
+        sample: SensorSample,
+        received_at: Instant,
+        server_now_us: u64,
+        server_session_id: u64,
+    ) -> bool {
         let Some(name) = self.by_mac.get(&sample.device_mac) else {
             return false;
         };
         if let Some(state) = self.by_name.get_mut(name) {
-            state.record(sample, received_at);
+            state.record(sample, received_at, server_now_us, server_session_id);
             true
         } else {
             false
         }
     }
+
+    pub fn contains_mac(&self, mac: MacAddress) -> bool {
+        self.by_mac.contains_key(&mac)
+    }
+}
+
+#[derive(Debug)]
+pub struct LatencyInterval {
+    pub samples_us: Vec<u64>,
+    pub total_samples: u64,
+    pub unsynced: u64,
+    pub clock_ahead: u64,
+    pub latest_sync_rtt_us: Option<u32>,
+}
+
+fn reservoir_index(sample_number: u64) -> u64 {
+    let mut value = sample_number.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^= value >> 31;
+    value % sample_number
+}
+
+pub fn latency_percentiles_us(mut samples_us: Vec<u64>) -> Option<[u64; 4]> {
+    if samples_us.is_empty() {
+        return None;
+    }
+    samples_us.sort_unstable();
+    let len = samples_us.len();
+    Some([
+        nearest_rank(&samples_us, len, 50),
+        nearest_rank(&samples_us, len, 75),
+        nearest_rank(&samples_us, len, 90),
+        nearest_rank(&samples_us, len, 99),
+    ])
+}
+
+fn nearest_rank(sorted_samples_us: &[u64], len: usize, percentile: usize) -> u64 {
+    let rank = (len * percentile).div_ceil(100).max(1);
+    sorted_samples_us[rank - 1]
 }
 
 #[derive(Debug, Default)]

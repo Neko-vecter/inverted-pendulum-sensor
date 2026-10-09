@@ -19,11 +19,14 @@ flowchart TB
 
     subgraph Server["Rust Sensor Server"]
         UDP["UDP Receiver :5000"]
+        TimeSync["Time Sync Handler"]
         Decoder["Packet Decoder"]
         Manager["Device State Manager"]
         Cache["Latest Sample Cache"]
-        Stats["Packet & Frequency Statistics"]
+        Stats["Packet, Rate & Latency Statistics"]
 
+        UDP --> TimeSync
+        TimeSync -->|"UDP sync response"| AP
         UDP --> Decoder
         Decoder --> Manager
         Manager --> Cache
@@ -35,6 +38,9 @@ flowchart TB
     E3 -->|"UDP / 1000 Hz"| AP
 
     AP --> UDP
+    AP -->|"UDP sync response"| E1
+    AP -->|"UDP sync response"| E2
+    AP -->|"UDP sync response"| E3
 ```
 
 ## ESP32-C6 Firmware Architecture
@@ -49,8 +55,9 @@ flowchart TD
     Driver["Sensor Driver"]
     Sampler["1 kHz Sampling Task"]
     Queue["Bounded Sample Queue"]
-    Encoder["26-byte Packet Encoder"]
+    Encoder["46-byte v2 Packet Encoder"]
     Sender["Nonblocking UDP Sender"]
+    Sync["UDP Clock Sync Client"]
     WiFi["Wi-Fi STA"]
 
     Sensor --> Driver
@@ -59,6 +66,8 @@ flowchart TD
     Queue --> Encoder
     Encoder --> Sender
     Sender --> WiFi
+    Sync <--> WiFi
+    Sync --> Encoder
 ```
 
 ### Responsibilities
@@ -66,8 +75,9 @@ flowchart TD
 - **Sensor Driver:** Reads the raw 14-bit angle value from the MT6701 over I²C.
 - **Sampling Task:** Uses a 1 ms high-resolution timer to target 1000 samples per second.
 - **Sample Queue:** Decouples sensor reads from network transmission; samples are dropped when the bounded queue is full or Wi-Fi is disconnected.
-- **Packet Encoder:** Encodes each sample into the fixed 26-byte binary format in [`protocol/protocol.md`](../protocol/protocol.md), including the Wi-Fi station MAC.
+- **Packet Encoder:** Encodes each sample into the fixed 46-byte version 2 binary format in [`protocol/protocol.md`](../protocol/protocol.md), including the Wi-Fi station MAC and clock-sync metadata.
 - **UDP Sender:** Sends one nonblocking UDP datagram per queued sample.
+- **Clock Sync Client:** Exchanges monotonic timestamps with the server over UDP about once per second and attaches the estimated clock offset and round-trip time to samples.
 - **Wi-Fi Manager:** Establishes and maintains network connectivity, including reconnection.
 
 ## Rust Sensor Server Architecture
@@ -80,6 +90,7 @@ flowchart TD
     Decoder["Protocol Decoder"]
     Validate{"Valid Packet?"}
     Router["MAC-to-Logical-Device Mapping"]
+    Sync["Clock Sync Response"]
 
     S1["Sensor #1 State"]
     S2["Sensor #2 State"]
@@ -88,6 +99,8 @@ flowchart TD
     Stats["Reception Statistics"]
 
     UDP --> Decoder
+    UDP --> Sync
+    Sync -->|"UDP response to node"| UDP
     Decoder --> Validate
 
     Validate -->|Yes| Router
@@ -106,6 +119,7 @@ flowchart TD
 
 - **UDP Receiver:** Listens on UDP port `5000`.
 - **Protocol Decoder:** Parses the fixed-length binary packets.
+- **Clock Sync Handler:** Replies to configured nodes with receive/send timestamps and the current server-session ID.
 - **Packet Validator:** Validates packet length, magic number, protocol version, packet type, and status fields.
 - **Device Mapping:** Maps each packet's MAC address to a configured logical sensor name or role.
 - **Device State Manager:** Maintains the latest sample for each sensor node.
@@ -123,7 +137,7 @@ flowchart TD
 | Firmware UDP Destination | Configurable per node; must match the server listener |
 | Sampling Rate | 1000 Hz per node (target) |
 | Transmission Mode | One packet per sample |
-| Packet Size | 26 bytes |
+| Packet Size | 46-byte version 2 sample; 26-byte version 1 samples remain accepted |
 | Byte Order | Big Endian |
 | Retransmission | Disabled |
 
@@ -140,10 +154,13 @@ flowchart TD
 | 22 | `raw_angle` | uint16 | 2 bytes |
 | 24 | `status` | uint8 | 1 byte |
 | 25 | `reserved` | uint8 | 1 byte |
+| 26 | `sync_session_id` | uint64 | 8 bytes |
+| 34 | `clock_offset_us` | int64 | 8 bytes |
+| 42 | `sync_round_trip_us` | uint32 | 4 bytes |
 
-**Total packet size: 26 bytes.**
+**Version 2 sample size: 46 bytes.**
 
-The `timestamp_us` field represents the ESP32's local monotonic time in microseconds. The server maps the embedded Wi-Fi station MAC to a logical sensor using its configuration file. Clocks are not synchronized across nodes in the MVP. See [`protocol/protocol.md`](../protocol/protocol.md) for field semantics and status bits.
+The `timestamp_us` field is the ESP32's local monotonic time at the start of the MT6701 I2C read. A UDP time-sync exchange estimates each node's offset from the server's monotonic clock. The server uses the offset and matching session ID to calculate per-device sample-to-receive latency percentiles. The metric does not model or subtract MT6701 internal measurement delay. Version 1 sample packets remain accepted but do not provide latency estimates. See [`protocol/protocol.md`](../protocol/protocol.md) for field semantics and status bits.
 
 ## Device Identification
 
@@ -160,12 +177,13 @@ All nodes use the same firmware and include their Wi-Fi station MAC in each samp
 - Rust UDP packet reception and validation.
 - Independent state management for three sensor nodes.
 - Packet reception statistics and sequence-based loss detection.
+- Device-to-server clock synchronization and per-device P50/P75/P90/P99 latency estimates.
 
 ### Excluded
 
 - Remote device configuration.
 - Remote start/stop commands.
-- Cross-device clock synchronization.
+- Hardware-level clock synchronization guarantees or a hard real-time latency guarantee.
 - Historical data storage.
 - Motor control algorithms.
 - Unix Domain Socket (UDS) interface.
@@ -186,4 +204,4 @@ flowchart LR
 
 The separation ensures that sensor acquisition and motion control can evolve independently.
 
-**MVP Acceptance Criteria:** The Rust Sensor Server can continuously receive raw angle measurements from three physical ESP32-C6 nodes, each targeting 1000 samples per second, while reporting per-device reception rates and packet loss statistics.
+**MVP Acceptance Criteria:** The Rust Sensor Server can continuously receive raw angle measurements from three physical ESP32-C6 nodes, each targeting 1000 samples per second, while reporting per-device reception rates, packet loss, and synchronized sample-to-receive latency percentiles.

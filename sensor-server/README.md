@@ -1,9 +1,10 @@
 # Rust sensor server
 
-This MVP server listens for the ESP32-C6 version 1 UDP sample protocol, maps
-the packet's station MAC address to a logical sensor name, and reports each
-sensor's latest reading and reception statistics. The wire format is defined
-in [`../protocol/protocol.md`](../protocol/protocol.md).
+This MVP server listens for ESP32-C6 version 1 and version 2 UDP sample
+protocols, maps each packet's station MAC address to a logical sensor name,
+replies to version 2 time-sync requests, and reports each sensor's latest
+reading and reception statistics. The wire format is defined in
+[`../protocol/protocol.md`](../protocol/protocol.md).
 
 ## Configure
 
@@ -54,6 +55,9 @@ each ESP32 must target the server interface address and the same UDP port.
 
 - Received rate and total well-formed packets per mapped sensor.
 - Latest angle, firmware sequence, local timestamp, and packet age.
+- P50, P75, P90, and P99 sample-to-server receive latency for synchronized
+  version 2 samples, plus sync round-trip time and counts of unsynced or
+  clock-ahead samples.
 - Sequence gaps, estimated lost samples, duplicates, out-of-order packets,
   and timestamp-detected restarts.
 - Sensor I2C errors, malformed datagrams, unknown MAC addresses, and socket
@@ -61,3 +65,10 @@ each ESP32 must target the server interface address and the same UDP port.
 
 Sequence-based loss is an estimate from received sequence numbers. It cannot
 distinguish network loss from samples omitted by the firmware before sending.
+Latency uses the device timestamp taken immediately before the MT6701 I2C read
+and a four-timestamp UDP clock-sync exchange. It is an estimate affected by
+round-trip path asymmetry and clock scheduling; version 1 samples have no
+latency estimate. The metric starts at the firmware timestamp before the I2C
+read and does not model or subtract MT6701 internal measurement delay. The
+server retains at most 50,000 latency samples per device per statistics
+interval for percentile calculation.

@@ -27,6 +27,9 @@
 
 #define SAMPLE_PERIOD_US 1000U
 #define SAMPLE_STATS_INTERVAL_US 5000000LL
+#define CLOCK_SYNC_INTERVAL_US 1000000LL
+#define CLOCK_SYNC_STALE_AFTER_US 3000000LL
+#define CLOCK_SYNC_MAX_RTT_US 1000000ULL
 #define SAMPLE_QUEUE_LENGTH 64U
 #define SAMPLE_TASK_STACK_SIZE 4096U
 #define UDP_TASK_STACK_SIZE 4096U
@@ -51,6 +54,21 @@ static i2c_master_dev_handle_t s_mt6701;
 static uint8_t s_station_mac[6];
 static struct sockaddr_in s_server_address;
 static bool s_network_enabled;
+
+typedef struct {
+    bool valid;
+    bool request_pending;
+    uint32_t next_sequence;
+    uint32_t pending_sequence;
+    uint64_t pending_t1_us;
+    uint64_t server_session_id;
+    int64_t offset_us;
+    uint32_t round_trip_us;
+    int64_t last_response_us;
+    int64_t next_request_us;
+} clock_sync_state_t;
+
+static clock_sync_state_t s_clock_sync;
 
 static const char *wifi_disconnect_reason_name(uint8_t reason)
 {
@@ -252,6 +270,115 @@ static int create_udp_socket(void)
     return socket_fd;
 }
 
+static uint32_t process_time_sync_responses(int socket_fd)
+{
+    uint32_t updates = 0;
+    for (;;) {
+        uint8_t packet[128];
+        struct sockaddr_in source_address = {0};
+        socklen_t source_length = sizeof(source_address);
+        const ssize_t packet_length = recvfrom(socket_fd,
+                                               packet,
+                                               sizeof(packet),
+                                               MSG_DONTWAIT,
+                                               (struct sockaddr *)&source_address,
+                                               &source_length);
+        if (packet_length < 0) {
+            if (errno != EWOULDBLOCK && errno != EAGAIN) {
+                ESP_LOGW(TAG, "Time-sync recvfrom failed: errno=%d", errno);
+            }
+            break;
+        }
+        const uint64_t device_t4_us = (uint64_t)esp_timer_get_time();
+        if (source_address.sin_family != AF_INET ||
+            source_address.sin_addr.s_addr != s_server_address.sin_addr.s_addr ||
+            source_address.sin_port != s_server_address.sin_port) {
+            continue;
+        }
+
+        sensor_time_sync_response_t response = {0};
+        if (!sensor_protocol_decode_time_sync_response(packet,
+                                                       (size_t)packet_length,
+                                                       &response) ||
+            memcmp(response.mac, s_station_mac, sizeof(s_station_mac)) != 0 ||
+            !s_clock_sync.request_pending ||
+            response.sequence != s_clock_sync.pending_sequence ||
+            response.device_t1_us != s_clock_sync.pending_t1_us ||
+            response.server_session_id == 0U) {
+            continue;
+        }
+
+        if (device_t4_us < response.device_t1_us ||
+            response.server_t3_us < response.server_t2_us) {
+            s_clock_sync.request_pending = false;
+            continue;
+        }
+
+        const uint64_t device_elapsed_us = device_t4_us - response.device_t1_us;
+        const uint64_t server_elapsed_us = response.server_t3_us - response.server_t2_us;
+        if (device_elapsed_us < server_elapsed_us) {
+            s_clock_sync.request_pending = false;
+            continue;
+        }
+        const uint64_t round_trip_us = device_elapsed_us - server_elapsed_us;
+        if (round_trip_us > CLOCK_SYNC_MAX_RTT_US) {
+            s_clock_sync.request_pending = false;
+            continue;
+        }
+
+        const int64_t outbound_offset_us = (int64_t)response.server_t2_us -
+                                           (int64_t)response.device_t1_us;
+        const int64_t inbound_offset_us = (int64_t)response.server_t3_us -
+                                          (int64_t)device_t4_us;
+        const int64_t measured_offset_us =
+            (outbound_offset_us + inbound_offset_us) / 2;
+
+        if (!s_clock_sync.valid ||
+            s_clock_sync.server_session_id != response.server_session_id) {
+            s_clock_sync.offset_us = measured_offset_us;
+        } else {
+            s_clock_sync.offset_us +=
+                (measured_offset_us - s_clock_sync.offset_us) / 4;
+        }
+        s_clock_sync.server_session_id = response.server_session_id;
+        s_clock_sync.round_trip_us = (uint32_t)round_trip_us;
+        s_clock_sync.last_response_us = (int64_t)device_t4_us;
+        s_clock_sync.valid = true;
+        s_clock_sync.request_pending = false;
+        ++updates;
+    }
+    return updates;
+}
+
+static void send_time_sync_request(int socket_fd,
+                                   int64_t now_us,
+                                   uint32_t *sync_errors_in_interval)
+{
+    if (now_us < s_clock_sync.next_request_us) {
+        return;
+    }
+
+    uint8_t packet[SENSOR_PROTOCOL_SYNC_REQUEST_SIZE];
+    const uint64_t device_t1_us = (uint64_t)esp_timer_get_time();
+    const uint32_t sequence = s_clock_sync.next_sequence++;
+    const size_t packet_length = sensor_protocol_encode_time_sync_request(
+        s_station_mac, sequence, device_t1_us, packet);
+    const ssize_t result = sendto(socket_fd,
+                                  packet,
+                                  packet_length,
+                                  0,
+                                  (const struct sockaddr *)&s_server_address,
+                                  sizeof(s_server_address));
+    if (result == (ssize_t)packet_length) {
+        s_clock_sync.pending_sequence = sequence;
+        s_clock_sync.pending_t1_us = device_t1_us;
+        s_clock_sync.request_pending = true;
+    } else {
+        ++(*sync_errors_in_interval);
+    }
+    s_clock_sync.next_request_us = now_us + CLOCK_SYNC_INTERVAL_US;
+}
+
 static void udp_sender_task(void *argument)
 {
     (void)argument;
@@ -259,12 +386,17 @@ static void udp_sender_task(void *argument)
     int socket_fd = -1;
     uint32_t sent_in_interval = 0;
     uint32_t errors_in_interval = 0;
+    uint32_t sync_errors_in_interval = 0;
+    uint32_t sync_updates_in_interval = 0;
     int last_send_errno = 0;
     int64_t interval_start_us = esp_timer_get_time();
 
     for (;;) {
         if (!wifi_is_connected()) {
             (void)xQueueReset(s_sample_queue);
+            s_clock_sync.valid = false;
+            s_clock_sync.request_pending = false;
+            s_clock_sync.next_request_us = 0;
             vTaskDelay(pdMS_TO_TICKS(50U));
             continue;
         }
@@ -277,6 +409,14 @@ static void udp_sender_task(void *argument)
             }
         }
 
+        sync_updates_in_interval += process_time_sync_responses(socket_fd);
+        int64_t now_us = esp_timer_get_time();
+        if (s_clock_sync.valid &&
+            now_us - s_clock_sync.last_response_us > CLOCK_SYNC_STALE_AFTER_US) {
+            s_clock_sync.valid = false;
+        }
+        send_time_sync_request(socket_fd, now_us, &sync_errors_in_interval);
+
         sensor_sample_t sample;
         if (xQueueReceive(s_sample_queue, &sample, pdMS_TO_TICKS(100U)) != pdTRUE) {
             continue;
@@ -285,6 +425,18 @@ static void udp_sender_task(void *argument)
             continue;
         }
 
+        now_us = esp_timer_get_time();
+        if (s_clock_sync.valid &&
+            now_us - s_clock_sync.last_response_us > CLOCK_SYNC_STALE_AFTER_US) {
+            s_clock_sync.valid = false;
+        }
+        sample.sync_session_id = s_clock_sync.valid
+                                     ? s_clock_sync.server_session_id
+                                     : 0U;
+        sample.clock_offset_us = s_clock_sync.valid ? s_clock_sync.offset_us : 0;
+        sample.sync_round_trip_us = s_clock_sync.valid
+                                        ? s_clock_sync.round_trip_us
+                                        : 0U;
         uint8_t packet[SENSOR_PROTOCOL_PACKET_SIZE];
         const size_t packet_length = sensor_protocol_encode_sample(&sample, packet);
         const ssize_t result = sendto(socket_fd,
@@ -300,14 +452,21 @@ static void udp_sender_task(void *argument)
             last_send_errno = result < 0 ? errno : EIO;
         }
 
-        const int64_t now_us = esp_timer_get_time();
+        now_us = esp_timer_get_time();
         if (now_us - interval_start_us >= 5000000) {
             ESP_LOGI(TAG,
                      "UDP packets sent=%" PRIu32 ", send errors=%" PRIu32
-                     ", last send errno=%d",
-                     sent_in_interval, errors_in_interval, last_send_errno);
+                     ", last send errno=%d, clock sync updates=%" PRIu32
+                     ", sync send errors=%" PRIu32 ", synced=%s"
+                     ", offset=%" PRId64 " us, sync RTT=%" PRIu32 " us",
+                     sent_in_interval, errors_in_interval, last_send_errno,
+                     sync_updates_in_interval, sync_errors_in_interval,
+                     s_clock_sync.valid ? "yes" : "no",
+                     s_clock_sync.offset_us, s_clock_sync.round_trip_us);
             sent_in_interval = 0;
             errors_in_interval = 0;
+            sync_errors_in_interval = 0;
+            sync_updates_in_interval = 0;
             last_send_errno = 0;
             interval_start_us = now_us;
         }
