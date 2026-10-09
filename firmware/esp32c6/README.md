@@ -33,7 +33,9 @@ Edit only the `CONFIG_SENSOR_*` entries in `sdkconfig.local` for Wi-Fi
 credentials, server IPv4 address/UDP port, or sensor I²C pins/clock. This file
 is ignored by Git. The example shows all project-specific options; their
 normal defaults are also defined in `src/Kconfig.projbuild`. Other settings
-come from PlatformIO's board configuration and ESP-IDF defaults.
+come from PlatformIO's board configuration and ESP-IDF defaults. A WPA2
+passphrase must be 8-63 bytes, or a 64-digit hexadecimal pre-shared key; an
+empty password selects an open network.
 
 The local file is an `SDKCONFIG_DEFAULTS` fragment, not the generated full
 ESP-IDF configuration. PlatformIO writes that full configuration under
@@ -41,6 +43,22 @@ ESP-IDF configuration. PlatformIO writes that full configuration under
 `sdkconfig.local`, run `pio run -t clean` and then `pio run` so the new local
 values are applied while ESP-IDF regenerates its full configuration. Use
 `pio run -t upload` to flash and `pio device monitor` to view logs.
+
+If Wi-Fi associates with the AP but repeatedly disconnects with reason `15`,
+ESP-IDF reports a four-way handshake timeout. Check that the local WPA2
+passphrase is correct. Editing `sdkconfig.local` does not update an existing
+generated configuration or an already-flashed image; clean, rebuild, and
+upload after changing Wi-Fi credentials. The disconnect log now includes a
+short reason description and never prints the passphrase.
+
+In ESP-IDF Wi-Fi logs, `authmode:0x3` means WPA2-PSK. The cipher value `0x3`
+means TKIP, which is deprecated; configure the AP for WPA2-Personal with
+AES/CCMP where possible.
+
+At startup, the firmware prints the compiled UDP destination. The periodic
+`send errors` count is for local `sendto` failures only; `last send errno`
+helps diagnose those failures. It does not confirm remote delivery. Use server
+sequence gaps to observe samples not received by the server.
 
 `pio run -t menuconfig` edits the generated full configuration. To keep local
 changes in the small ignored file, edit `sdkconfig.local` as the source of
@@ -51,6 +69,9 @@ The serial log prints the station MAC. Add that MAC to the Rust server's device
 mapping configuration to assign the node a logical role. The firmware does
 not contain a per-node numeric ID and does not receive configuration from the
 server.
+If the station MAC cannot be read, Wi-Fi/UDP are disabled so the node cannot
+send samples with an invalid all-zero device identity; sensor sampling can
+still run.
 
 ## Implementation notes
 
@@ -59,6 +80,9 @@ server.
 - A bounded queue separates acquisition from the nonblocking UDP sender. If
   Wi-Fi is down, the queue is cleared and acquisition continues. Sequence
   numbers therefore expose outages and local transmit drops to the receiver.
+- The sampler reports an estimated rate and counts for I²C errors, missed timer
+  slots, full-queue drops, and samples taken while Wi-Fi is unavailable every
+  five seconds.
 - Sampling is a 1 kHz target. Wi-Fi scheduling, I²C errors, and queue pressure
   can reduce the delivered rate; UDP does not retransmit lost packets.
 - The wire format is documented in [`protocol/protocol.md`](../../protocol/protocol.md).

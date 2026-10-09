@@ -11,8 +11,8 @@ config SENSOR_WIFI_PASSWORD
     string "Wi-Fi password"
     default ""
     help
-        Password for the configured Wi-Fi network. An empty password selects
-        an open network.
+        WPA2 passphrase for the configured network (8-63 bytes), or a 64-digit
+        hexadecimal pre-shared key. An empty password selects an open network.
 
 config SENSOR_SERVER_IPV4
     string "UDP server IPv4 address"

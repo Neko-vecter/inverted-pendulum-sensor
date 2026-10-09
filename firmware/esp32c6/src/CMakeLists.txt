@@ -5,8 +5,9 @@ idf_component_register(
         "sensor_protocol.c"
     INCLUDE_DIRS "."
     REQUIRES
-        driver
         esp_event
+        esp_driver_gpio
+        esp_driver_i2c
         esp_hw_support
         esp_netif
         freertos

@@ -119,7 +119,8 @@ flowchart TD
 |---|---|
 | Transport | UDP / IPv4 |
 | Network | Wi-Fi |
-| Server Port | 5000 |
+| Server Listen Port | 5000 (default) |
+| Firmware UDP Destination | Configurable per node; must match the server listener |
 | Sampling Rate | 1000 Hz per node (target) |
 | Transmission Mode | One packet per sample |
 | Packet Size | 26 bytes |

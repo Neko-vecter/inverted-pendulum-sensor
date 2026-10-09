@@ -91,9 +91,12 @@ The `status` bits in version 1 are:
 | 1 | `0x02` | MT6701 I²C read failed |
 | 2–7 | — | Reserved; transmitted as zero |
 
-On an I²C read failure, `raw_angle` is `0xFFFF`, bit 0 is clear, and bit 1 is
-set. A receiver must use the valid bit rather than treating `0xFFFF` as an
-angle.
+The sender emits exactly `0x01` when both I²C register reads succeed and
+exactly `0x02` when either read fails. For `status = 0x01`, `raw_angle` is in
+the range 0–16,383. For `status = 0x02`, `raw_angle` is `0xFFFF`. A version 1
+receiver should reject any other `status` value, including values with
+reserved bits set or both defined bits set. It must use the valid status bit
+and must not interpret `0xFFFF` as an angle.
 
 ## Example datagram
 

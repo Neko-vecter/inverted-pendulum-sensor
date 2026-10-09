@@ -26,6 +26,7 @@
 #include "sensor_protocol.h"
 
 #define SAMPLE_PERIOD_US 1000U
+#define SAMPLE_STATS_INTERVAL_US 5000000LL
 #define SAMPLE_QUEUE_LENGTH 64U
 #define SAMPLE_TASK_STACK_SIZE 4096U
 #define UDP_TASK_STACK_SIZE 4096U
@@ -51,6 +52,43 @@ static uint8_t s_station_mac[6];
 static struct sockaddr_in s_server_address;
 static bool s_network_enabled;
 
+static const char *wifi_disconnect_reason_name(uint8_t reason)
+{
+    switch (reason) {
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+        return "4-way handshake timeout; check the WPA2 passphrase/AP security";
+    case WIFI_REASON_HANDSHAKE_TIMEOUT:
+        return "handshake timeout; check the WPA2 passphrase/AP security";
+    case WIFI_REASON_NO_AP_FOUND:
+        return "AP not found; check SSID and signal";
+    case WIFI_REASON_AUTH_FAIL:
+        return "authentication failed; check the AP security settings";
+    default:
+        return "unclassified reason";
+    }
+}
+
+static bool wifi_password_is_valid(const char *password, size_t length)
+{
+    if (length == 0U || (length >= 8U && length < 64U)) {
+        return true;
+    }
+    if (length != 64U) {
+        return false;
+    }
+
+    for (size_t index = 0; index < length; ++index) {
+        const char value = password[index];
+        const bool is_digit = value >= '0' && value <= '9';
+        const bool is_lower_hex = value >= 'a' && value <= 'f';
+        const bool is_upper_hex = value >= 'A' && value <= 'F';
+        if (!is_digit && !is_lower_hex && !is_upper_hex) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool wifi_is_connected(void)
 {
     return (xEventGroupGetBits(s_wifi_events) & WIFI_CONNECTED_BIT) != 0;
@@ -72,8 +110,9 @@ static void wifi_event_handler(void *argument,
         const wifi_event_sta_disconnected_t *event = event_data;
         xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED_BIT);
         xEventGroupSetBits(s_wifi_events, WIFI_RECONNECT_BIT);
-        ESP_LOGW(TAG, "Wi-Fi disconnected (reason=%u); reconnecting",
-                 event != NULL ? (unsigned)event->reason : 0U);
+        const uint8_t reason = event != NULL ? event->reason : 0U;
+        ESP_LOGW(TAG, "Wi-Fi disconnected (reason=%u: %s); reconnecting",
+                 (unsigned)reason, wifi_disconnect_reason_name(reason));
         return;
     }
 
@@ -135,6 +174,11 @@ static esp_err_t wifi_start(void)
         ESP_LOGE(TAG, "Wi-Fi SSID/password exceeds the ESP-IDF field size");
         return ESP_ERR_INVALID_ARG;
     }
+    if (!wifi_password_is_valid(CONFIG_SENSOR_WIFI_PASSWORD, password_length)) {
+        ESP_LOGE(TAG,
+                 "WPA2 password must be 8-63 bytes or a 64-character hexadecimal PSK");
+        return ESP_ERR_INVALID_ARG;
+    }
 
     if (inet_pton(AF_INET, CONFIG_SENSOR_SERVER_IPV4,
                   &s_server_address.sin_addr) != 1) {
@@ -143,6 +187,9 @@ static esp_err_t wifi_start(void)
     }
     s_server_address.sin_family = AF_INET;
     s_server_address.sin_port = htons(CONFIG_SENSOR_SERVER_PORT);
+    ESP_LOGI(TAG, "UDP destination=%s:%u",
+             CONFIG_SENSOR_SERVER_IPV4,
+             (unsigned)CONFIG_SENSOR_SERVER_PORT);
 
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
@@ -212,6 +259,7 @@ static void udp_sender_task(void *argument)
     int socket_fd = -1;
     uint32_t sent_in_interval = 0;
     uint32_t errors_in_interval = 0;
+    int last_send_errno = 0;
     int64_t interval_start_us = esp_timer_get_time();
 
     for (;;) {
@@ -249,14 +297,18 @@ static void udp_sender_task(void *argument)
             ++sent_in_interval;
         } else {
             ++errors_in_interval;
+            last_send_errno = result < 0 ? errno : EIO;
         }
 
         const int64_t now_us = esp_timer_get_time();
         if (now_us - interval_start_us >= 5000000) {
-            ESP_LOGI(TAG, "UDP packets sent=%" PRIu32 ", send errors=%" PRIu32,
-                     sent_in_interval, errors_in_interval);
+            ESP_LOGI(TAG,
+                     "UDP packets sent=%" PRIu32 ", send errors=%" PRIu32
+                     ", last send errno=%d",
+                     sent_in_interval, errors_in_interval, last_send_errno);
             sent_in_interval = 0;
             errors_in_interval = 0;
+            last_send_errno = 0;
             interval_start_us = now_us;
         }
     }
@@ -267,11 +319,21 @@ static void sampling_task(void *argument)
     (void)argument;
 
     uint32_t sequence = 0;
+    uint32_t samples_in_interval = 0;
+    uint32_t i2c_errors_in_interval = 0;
+    uint32_t missed_slots_in_interval = 0;
+    uint32_t queue_drops_in_interval = 0;
+    uint32_t offline_samples_in_interval = 0;
+    int64_t stats_interval_start_us = esp_timer_get_time();
     bool first_sample = true;
     for (;;) {
         const uint32_t pending_ticks = ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        if (!first_sample && pending_ticks > 1U) {
-            sequence += pending_ticks - 1U;
+        if (pending_ticks > 1U) {
+            const uint32_t missed_slots = pending_ticks - 1U;
+            missed_slots_in_interval += missed_slots;
+            if (!first_sample) {
+                sequence += missed_slots;
+            }
         }
 
         sensor_sample_t sample = {0};
@@ -287,10 +349,40 @@ static void sampling_task(void *argument)
         } else {
             sample.raw_angle = INVALID_ANGLE;
             sample.status = SENSOR_STATUS_I2C_ERROR;
+            ++i2c_errors_in_interval;
         }
+        ++samples_in_interval;
 
         if (s_network_enabled && wifi_is_connected()) {
-            (void)xQueueSend(s_sample_queue, &sample, 0);
+            if (xQueueSend(s_sample_queue, &sample, 0) != pdTRUE) {
+                ++queue_drops_in_interval;
+            }
+        } else {
+            ++offline_samples_in_interval;
+        }
+
+        const int64_t now_us = esp_timer_get_time();
+        const int64_t elapsed_us = now_us - stats_interval_start_us;
+        if (elapsed_us >= SAMPLE_STATS_INTERVAL_US) {
+            const uint32_t sample_rate_hz = (uint32_t)(
+                ((uint64_t)samples_in_interval * 1000000ULL) /
+                (uint64_t)elapsed_us);
+            ESP_LOGI(TAG,
+                     "Sampling rate=%" PRIu32 " Hz, reads=%" PRIu32
+                     ", I2C errors=%" PRIu32 ", missed timer slots=%" PRIu32
+                     ", queue drops=%" PRIu32 ", Wi-Fi offline reads=%" PRIu32,
+                     sample_rate_hz,
+                     samples_in_interval,
+                     i2c_errors_in_interval,
+                     missed_slots_in_interval,
+                     queue_drops_in_interval,
+                     offline_samples_in_interval);
+            samples_in_interval = 0;
+            i2c_errors_in_interval = 0;
+            missed_slots_in_interval = 0;
+            queue_drops_in_interval = 0;
+            offline_samples_in_interval = 0;
+            stats_interval_start_us = now_us;
         }
     }
 }
@@ -306,14 +398,16 @@ void app_main(void)
     ESP_LOGI(TAG, "Starting ESP32-C6 MT6701 sensor node");
 
     esp_err_t err = esp_read_mac(s_station_mac, ESP_MAC_WIFI_STA);
+    const bool station_mac_valid = err == ESP_OK;
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Could not read Wi-Fi station MAC: %s", esp_err_to_name(err));
         memset(s_station_mac, 0, sizeof(s_station_mac));
+    } else {
+        ESP_LOGI(TAG, "Station MAC=%02X:%02X:%02X:%02X:%02X:%02X",
+                 (unsigned)s_station_mac[0], (unsigned)s_station_mac[1],
+                 (unsigned)s_station_mac[2], (unsigned)s_station_mac[3],
+                 (unsigned)s_station_mac[4], (unsigned)s_station_mac[5]);
     }
-    ESP_LOGI(TAG, "Station MAC=%02X:%02X:%02X:%02X:%02X:%02X",
-             (unsigned)s_station_mac[0], (unsigned)s_station_mac[1],
-             (unsigned)s_station_mac[2], (unsigned)s_station_mac[3],
-             (unsigned)s_station_mac[4], (unsigned)s_station_mac[5]);
 
     const esp_err_t sensor_err = mt6701_init(CONFIG_SENSOR_I2C_SDA_GPIO,
                                              CONFIG_SENSOR_I2C_SCL_GPIO,
@@ -332,20 +426,24 @@ void app_main(void)
         return;
     }
 
-    err = wifi_start();
-    if (err == ESP_OK) {
-        s_network_enabled = true;
-        if (xTaskCreate(udp_sender_task,
-                        "udp_sender",
-                        UDP_TASK_STACK_SIZE,
-                        NULL,
-                        UDP_TASK_PRIORITY,
-                        NULL) != pdPASS) {
-            ESP_LOGE(TAG, "Could not create UDP sender task");
-            s_network_enabled = false;
-        }
+    if (!station_mac_valid) {
+        ESP_LOGW(TAG, "Network disabled because the station MAC is unavailable");
     } else {
-        ESP_LOGW(TAG, "Network is disabled: %s", esp_err_to_name(err));
+        err = wifi_start();
+        if (err == ESP_OK) {
+            s_network_enabled = true;
+            if (xTaskCreate(udp_sender_task,
+                            "udp_sender",
+                            UDP_TASK_STACK_SIZE,
+                            NULL,
+                            UDP_TASK_PRIORITY,
+                            NULL) != pdPASS) {
+                ESP_LOGE(TAG, "Could not create UDP sender task");
+                s_network_enabled = false;
+            }
+        } else {
+            ESP_LOGW(TAG, "Network is disabled: %s", esp_err_to_name(err));
+        }
     }
 
     if (xTaskCreate(sampling_task,
