@@ -9,8 +9,8 @@ in [`../protocol/protocol.md`](../protocol/protocol.md).
 
 Copy the example file to a local configuration file:
 
-```powershell
-Copy-Item config.example.toml config.toml
+```shell
+cp config.example.toml config.toml
 ```
 
 Edit `config.toml` and set `server.bind_address` to the server's IPv4 address
