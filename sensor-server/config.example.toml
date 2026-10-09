@@ -1,0 +1,11 @@
+[server]
+# Listen on all IPv4 interfaces, UDP port 5000.
+bind_address = "0.0.0.0:5000"
+stats_interval_secs = 1
+
+# Map each sensor's Wi-Fi station MAC to its logical name.
+# Replace these example MAC addresses with the values printed by the firmware.
+[devices]
+"AA:BB:CC:DD:EE:01" = "sensor_1"
+"AA:BB:CC:DD:EE:02" = "sensor_2"
+"AA:BB:CC:DD:EE:03" = "sensor_3"
