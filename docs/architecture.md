@@ -166,7 +166,7 @@ The `timestamp_us` field is the ESP32's local monotonic time at the start of the
 
 All nodes use the same firmware and include their Wi-Fi station MAC in each sample packet. The server configuration maps each observed MAC address to a logical device name or sensor role. The firmware does not carry a per-node numeric ID; adding or remapping a node does not require rebuilding its image.
 
-## 6. MVP Scope
+## Current Scope
 
 ### Included
 
