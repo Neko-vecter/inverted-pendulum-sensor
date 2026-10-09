@@ -23,7 +23,7 @@ may be too weak for reliable operation at 400 kHz on some wiring.
 
 ## Local configuration and build
 
-From `firmware/esp32c6`, create the ignored local configuration once:
+From `firmware`, create the ignored local configuration once:
 
 ```shell
 cp sdkconfig.example.local sdkconfig.local
@@ -85,4 +85,4 @@ still run.
   five seconds.
 - Sampling is a 1 kHz target. Wi-Fi scheduling, I²C errors, and queue pressure
   can reduce the delivered rate; UDP does not retransmit lost packets.
-- The wire format is documented in [`protocol/protocol.md`](../../protocol/protocol.md).
+- The wire format is documented in [`protocol/protocol.md`](../protocol/protocol.md).
