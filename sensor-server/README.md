@@ -26,9 +26,9 @@ bind_address = "0.0.0.0:5000"
 stats_interval_secs = 1
 
 [devices]
-"AA:BB:CC:DD:EE:01" = "pendulum_base"
-"AA:BB:CC:DD:EE:02" = "pendulum_arm"
-"AA:BB:CC:DD:EE:03" = "pendulum_wheel"
+"AA:BB:CC:DD:EE:01" = "sensor_1"
+"AA:BB:CC:DD:EE:02" = "sensor_2"
+"AA:BB:CC:DD:EE:03" = "sensor_3"
 ```
 
 `config.toml` is ignored by Git. The example remains tracked, so local IPs,
