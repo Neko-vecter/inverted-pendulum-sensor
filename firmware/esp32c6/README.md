@@ -21,31 +21,31 @@ and SCL; use the breakout's pull-ups or add external pull-ups if it has none.
 The firmware enables the ESP32-C6 internal pull-ups as a convenience, but they
 may be too weak for reliable operation at 400 kHz on some wiring.
 
-## Configure and build
+## Local configuration and build
 
-From `firmware/esp32c6`:
+From `firmware/esp32c6`, create the ignored local configuration once:
 
-1. Run `pio run -t menuconfig`.
-2. Open **Pendulum sensor** and set the Wi-Fi SSID/password, the server IPv4
-   address and UDP port. Defaults are GPIO22/GPIO23, I²C at 400 kHz, and UDP
-   port 5000.
-3. Run `pio run` to build, `pio run -t upload` to flash, and
-   `pio device monitor` to view logs.
-
-PlatformIO writes the active configuration to `sdkconfig.local`, which is
-ignored by Git. The tracked `sdkconfig.seeed_xiao_esp32c6` supplies the shared
-base settings. After the local file is created, you can edit the values
-directly, for example:
-
-```ini
-CONFIG_SENSOR_SERVER_IPV4="192.168.1.20"
-CONFIG_SENSOR_SERVER_PORT=5000
-CONFIG_SENSOR_WIFI_SSID="your-network"
-CONFIG_SENSOR_WIFI_PASSWORD="your-password"
+```shell
+cp sdkconfig.example.local sdkconfig.local
 ```
 
-Run `pio run` after changing the file. With an empty SSID, the node still
-samples and logs but does not start Wi-Fi or send UDP packets.
+Edit only the `CONFIG_SENSOR_*` entries in `sdkconfig.local` for Wi-Fi
+credentials, server IPv4 address/UDP port, or sensor I²C pins/clock. This file
+is ignored by Git. The example shows all project-specific options; their
+normal defaults are also defined in `src/Kconfig.projbuild`. Other settings
+come from PlatformIO's board configuration and ESP-IDF defaults.
+
+The local file is an `SDKCONFIG_DEFAULTS` fragment, not the generated full
+ESP-IDF configuration. PlatformIO writes that full configuration under
+`.pio/build/seeed_xiao_esp32c6/`, which is also ignored by Git. After editing
+`sdkconfig.local`, run `pio run -t clean` and then `pio run` so the new local
+values are applied while ESP-IDF regenerates its full configuration. Use
+`pio run -t upload` to flash and `pio device monitor` to view logs.
+
+`pio run -t menuconfig` edits the generated full configuration. To keep local
+changes in the small ignored file, edit `sdkconfig.local` as the source of
+truth. With an empty SSID, the node still samples and logs but does not start
+Wi-Fi or send UDP packets.
 
 The serial log prints the station MAC. Add that MAC to the Rust server's device
 mapping configuration to assign the node a logical role. The firmware does
