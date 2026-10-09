@@ -39,7 +39,7 @@ flowchart TB
 
 ## ESP32-C6 Firmware Architecture
 
-Each ESP32-C6 runs the same firmware, with a unique `device_id` identifying its sensor node.
+Each ESP32-C6 runs the same firmware. Its Wi-Fi station MAC is included in each sample packet and identifies the node.
 
 The firmware is responsible for sensor sampling, packet encoding, Wi-Fi connectivity, and UDP transmission.
 
@@ -48,23 +48,26 @@ flowchart TD
     Sensor["MT6701 Sensor"]
     Driver["Sensor Driver"]
     Sampler["1 kHz Sampling Task"]
-    Encoder["16-byte Packet Encoder"]
-    Sender["UDP Sender"]
+    Queue["Bounded Sample Queue"]
+    Encoder["26-byte Packet Encoder"]
+    Sender["Nonblocking UDP Sender"]
     WiFi["Wi-Fi STA"]
 
     Sensor --> Driver
     Driver --> Sampler
-    Sampler --> Encoder
+    Sampler --> Queue
+    Queue --> Encoder
     Encoder --> Sender
     Sender --> WiFi
 ```
 
 ### Responsibilities
 
-- **Sensor Driver:** Reads the raw 14-bit angle value from the MT6701.
-- **Sampling Task:** Performs periodic sampling at a target rate of 1000 Hz.
-- **Packet Encoder:** Encodes each sample into a fixed 16-byte binary packet.
-- **UDP Sender:** Sends one UDP datagram per sample.
+- **Sensor Driver:** Reads the raw 14-bit angle value from the MT6701 over I²C.
+- **Sampling Task:** Uses a 1 ms high-resolution timer to target 1000 samples per second.
+- **Sample Queue:** Decouples sensor reads from network transmission; samples are dropped when the bounded queue is full or Wi-Fi is disconnected.
+- **Packet Encoder:** Encodes each sample into the fixed 26-byte binary format in [`protocol/protocol.md`](../protocol/protocol.md), including the Wi-Fi station MAC.
+- **UDP Sender:** Sends one nonblocking UDP datagram per queued sample.
 - **Wi-Fi Manager:** Establishes and maintains network connectivity, including reconnection.
 
 ## Rust Sensor Server Architecture
@@ -76,7 +79,7 @@ flowchart TD
     UDP["UDP Socket :5000"]
     Decoder["Protocol Decoder"]
     Validate{"Valid Packet?"}
-    Router["Device ID Router"]
+    Router["MAC-to-Logical-Device Mapping"]
 
     S1["Sensor #1 State"]
     S2["Sensor #2 State"]
@@ -103,7 +106,8 @@ flowchart TD
 
 - **UDP Receiver:** Listens on UDP port `5000`.
 - **Protocol Decoder:** Parses the fixed-length binary packets.
-- **Packet Validator:** Validates packet length, magic number, protocol version, and device ID.
+- **Packet Validator:** Validates packet length, magic number, protocol version, packet type, and status fields.
+- **Device Mapping:** Maps each packet's MAC address to a configured logical sensor name or role.
 - **Device State Manager:** Maintains the latest sample for each sensor node.
 - **Statistics:** Tracks packet reception rate, sequence gaps, and packet loss.
 
@@ -118,7 +122,7 @@ flowchart TD
 | Server Port | 5000 |
 | Sampling Rate | 1000 Hz per node (target) |
 | Transmission Mode | One packet per sample |
-| Packet Size | 16 bytes |
+| Packet Size | 26 bytes |
 | Byte Order | Big Endian |
 | Retransmission | Disabled |
 
@@ -128,26 +132,21 @@ flowchart TD
 |---|---|---|---|
 | 0 | `magic` | uint16 | 2 bytes |
 | 2 | `version` | uint8 | 1 byte |
-| 3 | `device_id` | uint8 | 1 byte |
-| 4 | `sequence` | uint32 | 4 bytes |
-| 8 | `timestamp_us` | uint32 | 4 bytes |
-| 12 | `raw_angle` | uint16 | 2 bytes |
-| 14 | `status` | uint8 | 1 byte |
-| 15 | `reserved` | uint8 | 1 byte |
+| 3 | `packet_type` | uint8 | 1 byte |
+| 4 | `device_mac` | byte[6] | 6 bytes |
+| 10 | `sequence` | uint32 | 4 bytes |
+| 14 | `timestamp_us` | uint64 | 8 bytes |
+| 22 | `raw_angle` | uint16 | 2 bytes |
+| 24 | `status` | uint8 | 1 byte |
+| 25 | `reserved` | uint8 | 1 byte |
 
-**Total packet size: 16 bytes.**
+**Total packet size: 26 bytes.**
 
-The `timestamp_us` field represents the ESP32's local monotonic time in microseconds. Clocks are not synchronized across nodes in the MVP.
+The `timestamp_us` field represents the ESP32's local monotonic time in microseconds. The server maps the embedded Wi-Fi station MAC to a logical sensor using its configuration file. Clocks are not synchronized across nodes in the MVP. See [`protocol/protocol.md`](../protocol/protocol.md) for field semantics and status bits.
 
 ## Device Identification
 
-| Device | Device ID | Sensor |
-|---|---|---|
-| ESP32-C6 #1 | 1 | MT6701 #1 |
-| ESP32-C6 #2 | 2 | MT6701 #2 |
-| ESP32-C6 #3 | 3 | MT6701 #3 |
-
-All three devices share the same firmware codebase, with different device configurations.
+All nodes use the same firmware and include their Wi-Fi station MAC in each sample packet. The server configuration maps each observed MAC address to a logical device name or sensor role. The firmware does not carry a per-node numeric ID; adding or remapping a node does not require rebuilding its image.
 
 ## 6. MVP Scope
 

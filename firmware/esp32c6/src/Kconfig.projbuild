@@ -1,0 +1,41 @@
+menu "Pendulum sensor"
+
+config SENSOR_WIFI_SSID
+    string "Wi-Fi SSID"
+    default ""
+    help
+        Wi-Fi network used by the sensor node. Leave empty to run sampling
+        without starting the network.
+
+config SENSOR_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default ""
+    help
+        Password for the configured Wi-Fi network. An empty password selects
+        an open network.
+
+config SENSOR_SERVER_IPV4
+    string "UDP server IPv4 address"
+    default "192.168.1.100"
+
+config SENSOR_SERVER_PORT
+    int "UDP server port"
+    range 1 65535
+    default 5000
+
+config SENSOR_I2C_SDA_GPIO
+    int "MT6701 I2C SDA GPIO"
+    range 0 30
+    default 22
+
+config SENSOR_I2C_SCL_GPIO
+    int "MT6701 I2C SCL GPIO"
+    range 0 30
+    default 23
+
+config SENSOR_I2C_CLOCK_HZ
+    int "MT6701 I2C clock (Hz)"
+    range 100000 400000
+    default 400000
+
+endmenu
