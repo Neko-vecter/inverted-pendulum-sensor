@@ -1,7 +1,8 @@
-# Sensor UDP Protocol, Version 2
+﻿# Sensor UDP Protocol, Version 2
 
-This document defines the UDP sample and time-synchronization datagrams between
-each ESP32-C6 sensor node and the Rust Sensor Server.
+This document defines the single supported UDP format between each ESP32-C6
+sensor and the Rust Sensor Server. Version 2 uses 32-bit wrapping microsecond
+counters for device and server time.
 
 ## Transport
 
@@ -12,14 +13,13 @@ each ESP32-C6 sensor node and the Rust Sensor Server.
 | Destination | Server IPv4 and UDP port from firmware configuration |
 | Default destination port | 5000 |
 | Sample target | 1,000 datagrams per second per node |
-| Version 1 sample payload | 26 bytes; accepted for compatibility, no latency estimate |
-| Version 2 sample payload | 46 bytes |
-| Byte order | Big-endian for multi-byte integers |
+| Sample packet length | 38 bytes |
+| Byte order | Big-endian for multi-byte fields |
 | Retransmission | None |
 
-Version 2 sends one sample datagram per sampling slot and a small time-sync
-request/response about once per second. UDP remains best effort. Queue overflow
-and Wi-Fi outages can produce sequence gaps; samples are not replayed afterward.
+The device sends one sample datagram per sampling slot and a time-sync
+request/response about once per second. UDP is best effort. Queue overflow and
+Wi-Fi outages can produce sequence gaps; samples are not replayed later.
 
 ## Common header
 
@@ -27,17 +27,17 @@ Every datagram begins with this four-byte header:
 
 | Offset | Length | Field | Encoding |
 |---:|---:|---|---|
-| 0 | 2 | magic | Unsigned 16-bit big-endian; 0x4950 (IP) |
-| 2 | 1 | version | Protocol version: 1 or 2 |
+| 0 | 2 | magic | Unsigned 16-bit big-endian; 0x4950 |
+| 2 | 1 | version | 2 |
 | 3 | 1 | packet_type | Sample 0x01, time-sync request 0x02, response 0x03 |
 
-Version 1 defines only 26-byte sample datagrams. Version 2 defines 46-byte
-sample datagrams and the time-sync messages below. Receivers reject unknown
-magic, versions, packet types, and lengths.
+Receivers accept only version 2 and the packet lengths in this document. The
+earlier 46-byte version 2 sample layout is not supported. Packets with unknown
+magic, versions, types, or lengths are rejected.
 
-## Version 2 sample frame
+## Sample frame
 
-The packet is encoded field by field; it is not a native C structure and has no
+The packet is encoded field by field. It is not a native C structure and has no
 compiler-dependent padding.
 
 | Offset | Length | Field | Encoding |
@@ -46,18 +46,16 @@ compiler-dependent padding.
 | 2 | 1 | version | 2 |
 | 3 | 1 | packet_type | Sample 0x01 |
 | 4 | 6 | device_mac | Raw Wi-Fi station MAC octets, display order |
-| 10 | 4 | sequence | Unsigned 32-bit big-endian |
-| 14 | 8 | timestamp_us | ESP32 monotonic microseconds at start of MT6701 I2C read |
-| 22 | 2 | raw_angle | Unsigned 16-bit; valid range 0–16,383 |
-| 24 | 1 | status | Status field described below |
-| 25 | 1 | reserved | Zero; receiver ignores it |
-| 26 | 8 | sync_session_id | Server session identifier; zero means unsynchronized |
-| 34 | 8 | clock_offset_us | Signed 64-bit two's complement; server clock minus device clock |
-| 42 | 4 | sync_round_trip_us | Round-trip time from the latest accepted sync exchange |
+| 10 | 4 | sequence | Unsigned 32-bit big-endian sample-slot counter |
+| 14 | 4 | timestamp_us | Unsigned 32-bit wrapping device microsecond counter |
+| 18 | 2 | raw_angle | Unsigned 16-bit; valid range 0-16,383 |
+| 20 | 1 | status | Status field described below |
+| 21 | 1 | reserved | Zero |
+| 22 | 8 | sync_session_id | Server session identifier; zero means unsynchronized |
+| 30 | 4 | clock_offset_us | Unsigned 32-bit modular server-minus-device offset |
+| 34 | 4 | sync_round_trip_us | Latest accepted sync round-trip time in microseconds |
 
-Total version 2 sample length is **46 bytes**. The sample timestamp remains in
-the device's monotonic clock domain. The server uses the supplied offset to map
-it into the current server session's monotonic clock domain.
+Total sample length is **38 bytes**.
 
 ### Device identity and mapping
 
@@ -70,47 +68,43 @@ The firmware has no per-node numeric ID. The server maps each MAC to a logical
 sensor name or role in its configuration file. Unknown MAC addresses are
 counted and are not assigned to a configured device.
 
-### Sequence
+### Sequence counter
 
 sequence starts at zero for the first sampling task wake after boot and
 advances for each subsequent 1 ms sampling slot, including slots whose sample
-is not transmitted. It wraps modulo 2^32. Samples omitted during a Wi-Fi outage,
-when the sampler is late, or when the local queue is full appear as gaps. The
-server's loss estimate cannot distinguish network loss from samples the
-firmware omitted before transmission.
+is not transmitted. It wraps modulo 2^32. This counter is independent of
+timestamp_us. The server uses modular sequence differences to estimate gaps;
+the estimate cannot distinguish network loss from samples omitted by firmware
+before transmission.
 
-### Timestamp and latency
+### Device timestamp and counter wrap
 
-timestamp_us is esp_timer_get_time() in microseconds, captured immediately
-before the firmware starts the MT6701 I2C read. It is monotonic, local to that
-ESP32 boot, and is not a Unix timestamp. The latency metric starts at this
-timestamp and does not model or subtract MT6701 internal measurement delay.
+timestamp_us is the low 32 bits of esp_timer_get_time(), captured immediately
+before the firmware starts the MT6701 I2C read. It is monotonic within a boot,
+local to that ESP32, and is not a Unix timestamp. It wraps every 2^32
+microseconds (about 71 minutes 35 seconds).
 
-For a synchronized sample whose sync_session_id matches the server's current
-session, the server estimates sample-to-receive latency as:
+All comparisons between wrapping counters use modulo-2^32 differences. A
+forward interval is unambiguous only when it is less than 2^31 microseconds
+(about 35 minutes 47 seconds). The firmware rejects sync exchanges whose
+measured device or server intervals are at least 2^31 microseconds. In normal
+operation, sync requests are sent about once per second and accepted RTT is at
+most 1 second.
 
-    latency_us = server_receive_monotonic_us
-               - (timestamp_us + clock_offset_us)
+The server's time origin is Instant::now() captured at the beginning of main,
+before command-line and configuration processing. Server timestamps are
+elapsed microseconds from that origin, truncated modulo 2^32 for the wire
+protocol. Internal statistics continue to use monotonic Instant durations.
 
-server_receive_monotonic_us is captured when the server's recv_from call
-returns. This measures from the firmware timestamp point through I2C
-acquisition, firmware queueing, UDP/Wi-Fi delivery, and server receive
-scheduling. Clock-offset error and path asymmetry limit one-way latency
-accuracy. Samples without a valid current-session offset, or with a negative
-computed latency, are excluded from percentiles and counted separately.
-
-The server reports P50, P75, P90, and P99 per configured device and statistics
-interval, using the nearest-rank percentile definition. It retains at most
-50,000 latency samples per device per interval; larger intervals use a bounded
-reservoir sample, while the log reports both the total and retained sample
-counts. Version 1 samples have no sync metadata and do not contribute to
-latency percentiles.
+The latency metric starts at the device timestamp and does not model or
+subtract MT6701 internal measurement delay.
 
 ### Angle and status
 
-The MT6701 provides a 14-bit absolute angle. The firmware reads register 0x03
-then 0x04, and combines Angle[13:6] from the first byte with Angle[5:0] from
-bits 7 through 2 of the second byte. Convert the transmitted integer to degrees:
+The MT6701 provides a 14-bit absolute angle. The firmware reads register
+0x03 then 0x04, and combines Angle[13:6] from the first byte with Angle[5:0]
+from bits 7 through 2 of the second byte. Convert the transmitted integer to
+degrees:
 
     degrees = raw_angle * 360.0 / 16384.0
 
@@ -118,11 +112,11 @@ bits 7 through 2 of the second byte. Convert the transmitted integer to degrees:
 |---:|---:|---|
 | 0 | 0x01 | Angle valid; both I2C reads succeeded |
 | 1 | 0x02 | MT6701 I2C read failed |
-| 2–7 | — | Reserved; zero |
+| 2-7 | - | Reserved; zero |
 
-The sender emits exactly 0x01 on success and 0x02 on an I2C failure. For
-status 0x01, raw_angle is 0–16,383. For status 0x02, raw_angle is 0xFFFF.
-Receivers reject other status values, including both defined bits being set.
+The sender emits exactly 0x01 on success and 0x02 on an I2C failure. For status
+0x01, raw_angle is 0-16,383. For status 0x02, raw_angle is 0xFFFF. Receivers
+reject other status values, including both defined bits being set.
 
 ## Time synchronization messages
 
@@ -137,9 +131,9 @@ response.
 | 0 | 4 | Common header | Version 2, type 0x02 |
 | 4 | 6 | device_mac | Raw station MAC octets |
 | 10 | 4 | sync_sequence | Unsigned 32-bit big-endian |
-| 14 | 8 | device_t1_us | Device monotonic time captured immediately before request encoding/send |
+| 14 | 4 | device_t1_us | Device wrapping counter before request encoding/send |
 
-Total request length is **22 bytes**.
+Total request length is **18 bytes**.
 
 ### Response: server to device
 
@@ -148,29 +142,50 @@ Total request length is **22 bytes**.
 | 0 | 4 | Common header | Version 2, type 0x03 |
 | 4 | 6 | device_mac | Echoed station MAC |
 | 10 | 4 | sync_sequence | Echoed request sequence |
-| 14 | 8 | device_t1_us | Echoed device timestamp |
-| 22 | 8 | server_t2_us | Server monotonic time when request was received |
-| 30 | 8 | server_t3_us | Server monotonic time captured immediately before response encoding/send |
-| 38 | 8 | server_session_id | Nonzero ID that changes when the server process restarts |
+| 14 | 4 | device_t1_us | Echoed device timestamp |
+| 18 | 4 | server_t2_us | Server wrapping counter when request was received |
+| 22 | 4 | server_t3_us | Server wrapping counter before response encoding/send |
+| 26 | 8 | server_session_id | Nonzero ID that changes when the server process restarts |
 
-Total response length is **46 bytes**. On receipt of the matching response, the
-device records device_t4_us from its monotonic clock and estimates:
+Total response length is **34 bytes**. On receipt of the matching response, the
+device records device_t4_us from its wrapping counter. All subtractions below
+are modulo 2^32; signed offset deltas use the nearest signed interpretation in
+the range [-2^31, 2^31-1]:
 
-    round_trip_us = (device_t4_us - device_t1_us) - (server_t3_us - server_t2_us)
-    clock_offset_us = ((server_t2_us - device_t1_us)
-                     + (server_t3_us - device_t4_us)) / 2
+    device_elapsed = (device_t4_us - device_t1_us) mod 2^32
+    server_elapsed = (server_t3_us - server_t2_us) mod 2^32
+    round_trip_us = device_elapsed - server_elapsed
 
-The offset convention is server clock minus device clock; adding it to
-timestamp_us maps the sample into server time. Firmware refreshes synchronization
-periodically and marks it unavailable after responses become stale. A zero
-session ID means the sample is unsynchronized. After server restart, the session
-ID changes, preventing an old offset from producing valid-looking latency data.
+    offset_a = signed_modular_difference(server_t2_us, device_t1_us)
+    offset_b = signed_modular_difference(server_t3_us, device_t4_us)
+    clock_offset_us = (offset_a + offset_b) / 2, represented modulo 2^32
 
-## Version 1 compatibility
+The offset convention is server clock minus device clock. Adding it to a device
+timestamp maps that timestamp into the server's wrapping clock domain. The
+firmware smooths offset updates within a server session and replaces the
+estimate when the session ID changes. A zero session ID in a sample means the
+device is not synchronized. After server restart, a new session ID prevents an
+old offset from producing valid-looking latency data.
 
-The server accepts version 1 sample datagrams of exactly 26 bytes with the
-original fields and offsets. Version 1 timestamps are device-local monotonic
-values and are not latency-measured. New firmware sends version 2.
+## Latency calculation
+
+For a sample whose sync_session_id matches the server's current session, the
+server calculates the sample-to-receive delay using 32-bit modular arithmetic:
+
+    mapped_sample_us = (timestamp_us + clock_offset_us) mod 2^32
+    latency_us = (server_receive_us - mapped_sample_us) mod 2^32
+
+server_receive_us is captured when the server's recv_from call returns. The
+server accepts the latency only when it is less than 2^31 microseconds; a
+larger value is treated as a clock-ahead or ambiguous result and excluded from
+percentiles. The metric includes I2C acquisition after the timestamp point,
+firmware queueing, UDP/Wi-Fi delivery, and server receive scheduling. Clock
+offset error and path asymmetry limit one-way latency accuracy.
+
+The server reports P50, P75, P90, and P99 per configured device and statistics
+interval, using the nearest-rank percentile definition. It retains at most
+50,000 latency samples per device per interval; larger intervals use a bounded
+reservoir sample, while the log reports both total and retained sample counts.
 
 ## Scope
 

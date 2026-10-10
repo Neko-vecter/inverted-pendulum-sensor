@@ -2,7 +2,8 @@
 
 This PlatformIO project samples one MT6701 over I²C and sends one UDP sample
 datagram per 1 ms sampling tick when Wi-Fi is connected. Version 2 packets
-include clock-sync metadata; all nodes use the same firmware. The Wi-Fi station
+include clock-sync metadata and a 32-bit wrapping microsecond counter; all
+nodes use the same firmware. The Wi-Fi station
 MAC carried in each packet identifies the node; the Rust server assigns its
 logical sensor name from its own configuration.
 
@@ -58,7 +59,8 @@ AES/CCMP where possible.
 
 At startup, the firmware prints the compiled UDP destination. It sends a
 four-timestamp clock-sync request about once per second and includes the
-estimated server clock offset and sync round-trip time in each version 2 sample.
+estimated modular server clock offset and sync round-trip time in each version
+2 sample.
 The periodic `send errors` count is for sample `sendto` failures;
 `sync send errors` counts time-sync request failures. Neither confirms remote
 delivery. Use server sequence gaps to observe samples not received by the

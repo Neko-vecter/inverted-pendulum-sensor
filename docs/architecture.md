@@ -55,7 +55,7 @@ flowchart TD
     Driver["Sensor Driver"]
     Sampler["1 kHz Sampling Task"]
     Queue["Bounded Sample Queue"]
-    Encoder["46-byte v2 Packet Encoder"]
+    Encoder["38-byte v2 Packet Encoder"]
     Sender["Nonblocking UDP Sender"]
     Sync["UDP Clock Sync Client"]
     WiFi["Wi-Fi STA"]
@@ -75,7 +75,7 @@ flowchart TD
 - **Sensor Driver:** Reads the raw 14-bit angle value from the MT6701 over I²C.
 - **Sampling Task:** Uses a 1 ms high-resolution timer to target 1000 samples per second.
 - **Sample Queue:** Decouples sensor reads from network transmission; samples are dropped when the bounded queue is full or Wi-Fi is disconnected.
-- **Packet Encoder:** Encodes each sample into the fixed 46-byte version 2 binary format in [`protocol/protocol.md`](../protocol/protocol.md), including the Wi-Fi station MAC and clock-sync metadata.
+- **Packet Encoder:** Encodes each sample into the fixed 38-byte version 2 binary format in [`protocol/protocol.md`](../protocol/protocol.md), including the Wi-Fi station MAC and clock-sync metadata.
 - **UDP Sender:** Sends one nonblocking UDP datagram per queued sample.
 - **Clock Sync Client:** Exchanges monotonic timestamps with the server over UDP about once per second and attaches the estimated clock offset and round-trip time to samples.
 - **Wi-Fi Manager:** Establishes and maintains network connectivity, including reconnection.
@@ -137,7 +137,7 @@ flowchart TD
 | Firmware UDP Destination | Configurable per node; must match the server listener |
 | Sampling Rate | 1000 Hz per node (target) |
 | Transmission Mode | One packet per sample |
-| Packet Size | 46-byte version 2 sample; 26-byte version 1 samples remain accepted |
+| Packet Size | 38-byte version 2 sample |
 | Byte Order | Big Endian |
 | Retransmission | Disabled |
 
@@ -150,17 +150,22 @@ flowchart TD
 | 3 | `packet_type` | uint8 | 1 byte |
 | 4 | `device_mac` | byte[6] | 6 bytes |
 | 10 | `sequence` | uint32 | 4 bytes |
-| 14 | `timestamp_us` | uint64 | 8 bytes |
-| 22 | `raw_angle` | uint16 | 2 bytes |
-| 24 | `status` | uint8 | 1 byte |
-| 25 | `reserved` | uint8 | 1 byte |
-| 26 | `sync_session_id` | uint64 | 8 bytes |
-| 34 | `clock_offset_us` | int64 | 8 bytes |
-| 42 | `sync_round_trip_us` | uint32 | 4 bytes |
+| 14 | `timestamp_us` | uint32 | 4 bytes |
+| 18 | `raw_angle` | uint16 | 2 bytes |
+| 20 | `status` | uint8 | 1 byte |
+| 21 | `reserved` | uint8 | 1 byte |
+| 22 | `sync_session_id` | uint64 | 8 bytes |
+| 30 | `clock_offset_us` | uint32 | 4 bytes |
+| 34 | `sync_round_trip_us` | uint32 | 4 bytes |
 
-**Version 2 sample size: 46 bytes.**
+**Version 2 sample size: 38 bytes.** The device and server use 32-bit wrapping
+microsecond counters, with modular comparisons limited to intervals below
+2^31 microseconds. The server's monotonic time origin is captured at the start
+of `main`. The previous 46-byte version 2 format and version 1 packets are not
+accepted. See [`protocol/protocol.md`](../protocol/protocol.md) for timestamp,
+sync, and latency formulas.
 
-The `timestamp_us` field is the ESP32's local monotonic time at the start of the MT6701 I2C read. A UDP time-sync exchange estimates each node's offset from the server's monotonic clock. The server uses the offset and matching session ID to calculate per-device sample-to-receive latency percentiles. The metric does not model or subtract MT6701 internal measurement delay. Version 1 sample packets remain accepted but do not provide latency estimates. See [`protocol/protocol.md`](../protocol/protocol.md) for field semantics and status bits.
+The `timestamp_us` field is the low 32 bits of the ESP32's local monotonic time at the start of the MT6701 I2C read. A UDP time-sync exchange estimates each node's modular offset from the server's monotonic clock. The server uses the offset and matching session ID to calculate per-device sample-to-receive latency percentiles. The metric does not model or subtract MT6701 internal measurement delay. See [`protocol/protocol.md`](../protocol/protocol.md) for field semantics and status bits.
 
 ## Device Identification
 

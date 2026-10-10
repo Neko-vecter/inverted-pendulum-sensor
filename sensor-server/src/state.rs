@@ -25,7 +25,7 @@ pub struct DeviceState {
     pub latency_clock_ahead: u64,
     pub latest_sync_rtt_us: Option<u32>,
     last_sequence: Option<u32>,
-    last_timestamp_us: Option<u64>,
+    last_timestamp_us: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -63,7 +63,7 @@ impl DeviceState {
         &mut self,
         sample: SensorSample,
         received_at: Instant,
-        server_now_us: u64,
+        server_now_us: u32,
         server_session_id: u64,
     ) {
         self.received_total += 1;
@@ -80,7 +80,9 @@ impl DeviceState {
                 self.sequence_slots += 1;
                 advances_sequence = true;
             }
-            (Some(_), Some(last_timestamp_us)) if sample.timestamp_us < last_timestamp_us => {
+            (Some(_), Some(last_timestamp_us))
+                if timestamp_is_behind(sample.timestamp_us, last_timestamp_us) =>
+            {
                 self.restarts += 1;
                 self.sequence_slots += 1;
                 advances_sequence = true;
@@ -117,7 +119,9 @@ impl DeviceState {
                 });
             } else if self
                 .latest
-                .is_some_and(|latest| sample.timestamp_us >= latest.sample.timestamp_us)
+                .is_some_and(|latest| {
+                    timestamp_is_not_older(sample.timestamp_us, latest.sample.timestamp_us)
+                })
             {
                 self.latest = Some(LatestSample {
                     sample,
@@ -130,7 +134,7 @@ impl DeviceState {
     fn record_latency(
         &mut self,
         sample: SensorSample,
-        server_now_us: u64,
+        server_now_us: u32,
         server_session_id: u64,
     ) {
         let Some(sync) = sample.clock_sync else {
@@ -143,12 +147,10 @@ impl DeviceState {
         }
 
         self.latest_sync_rtt_us = Some(sync.round_trip_us);
-        let estimated_sample_server_us = i128::from(sample.timestamp_us)
-            + i128::from(sync.offset_us);
-        let latency_us = i128::from(server_now_us) - estimated_sample_server_us;
-        if latency_us < 0 {
-            self.latency_clock_ahead += 1;
-        } else if let Ok(latency_us) = u64::try_from(latency_us) {
+        let sample_server_us = sample.timestamp_us.wrapping_add(sync.offset_us);
+        let latency_us = server_now_us.wrapping_sub(sample_server_us);
+        let latency_us = (latency_us < 0x8000_0000).then_some(u64::from(latency_us));
+        if let Some(latency_us) = latency_us {
             self.latency_total_samples += 1;
             if self.latency_samples_us.len() < MAX_LATENCY_PERCENTILE_SAMPLES {
                 self.latency_samples_us.push(latency_us);
@@ -183,6 +185,14 @@ impl DeviceState {
     }
 }
 
+fn timestamp_is_behind(sample_timestamp: u32, previous_timestamp: u32) -> bool {
+    sample_timestamp.wrapping_sub(previous_timestamp) >= 0x8000_0000
+}
+
+fn timestamp_is_not_older(sample_timestamp: u32, latest_timestamp: u32) -> bool {
+    sample_timestamp.wrapping_sub(latest_timestamp) < 0x8000_0000
+}
+
 #[derive(Debug)]
 pub struct DeviceRegistry {
     by_mac: HashMap<MacAddress, String>,
@@ -205,7 +215,7 @@ impl DeviceRegistry {
         &mut self,
         sample: SensorSample,
         received_at: Instant,
-        server_now_us: u64,
+        server_now_us: u32,
         server_session_id: u64,
     ) -> bool {
         let Some(name) = self.by_mac.get(&sample.device_mac) else {

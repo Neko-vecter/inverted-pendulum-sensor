@@ -17,6 +17,7 @@ const UDP_BUFFER_SIZE: usize = 2048;
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_millis(100);
 
 fn main() {
+    let server_start = Instant::now();
     let config_path = match config_path_from_args() {
         Ok(Some(path)) => path,
         Ok(None) => {
@@ -30,7 +31,7 @@ fn main() {
         }
     };
 
-    if let Err(error) = run(&config_path) {
+    if let Err(error) = run(&config_path, server_start) {
         eprintln!("sensor-server: {error}");
         process::exit(1);
     }
@@ -64,7 +65,7 @@ fn print_usage() {
     println!("Default config path: config.toml in the current directory");
 }
 
-fn run(config_path: &std::path::Path) -> Result<(), String> {
+fn run(config_path: &std::path::Path, server_start: Instant) -> Result<(), String> {
     let config = config::load(config_path)?;
     let server_session_id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -72,7 +73,6 @@ fn run(config_path: &std::path::Path) -> Result<(), String> {
         .as_micros()
         .min(u128::from(u64::MAX)) as u64;
     let server_session_id = server_session_id.max(1);
-    let server_start = Instant::now();
     let socket = UdpSocket::bind(config.bind_address)
         .map_err(|error| format!("cannot bind UDP {}: {error}", config.bind_address))?;
     socket
@@ -83,7 +83,7 @@ fn run(config_path: &std::path::Path) -> Result<(), String> {
         .local_addr()
         .map_err(|error| format!("cannot read bound UDP address: {error}"))?;
     println!(
-        "sensor-server listening on {local_address}; protocol v1/v2, {} configured device(s)",
+        "sensor-server listening on {local_address}; protocol v2, {} configured device(s)",
         config.devices_by_mac.len()
     );
     println!("time-sync session: {server_session_id}");
@@ -99,7 +99,7 @@ fn run(config_path: &std::path::Path) -> Result<(), String> {
         match socket.recv_from(&mut buffer) {
             Ok((length, sender)) => {
                 let received_at = Instant::now();
-                let server_now_us = monotonic_us(server_start, received_at);
+                let server_now_us = monotonic_us(server_start, received_at) as u32;
                 handle_datagram(
                     &buffer[..length],
                     sender,
@@ -138,7 +138,7 @@ fn handle_datagram(
     packet: &[u8],
     sender: SocketAddr,
     received_at: Instant,
-    server_now_us: u64,
+    server_now_us: u32,
     server_start: Instant,
     server_session_id: u64,
     socket: &UdpSocket,
@@ -171,7 +171,7 @@ fn handle_datagram(
             if !devices.contains_mac(request.device_mac) {
                 return;
             }
-            let server_t3_us = monotonic_us(server_start, Instant::now());
+            let server_t3_us = monotonic_us(server_start, Instant::now()) as u32;
             let response = encode_time_sync_response(
                 request,
                 server_now_us,

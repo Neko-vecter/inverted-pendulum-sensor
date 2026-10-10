@@ -1,13 +1,11 @@
 use std::fmt;
 use std::str::FromStr;
 
-pub const V1_SAMPLE_PACKET_SIZE: usize = 26;
-pub const V2_SAMPLE_PACKET_SIZE: usize = 46;
-pub const TIME_SYNC_REQUEST_SIZE: usize = 22;
-pub const TIME_SYNC_RESPONSE_SIZE: usize = 46;
+pub const SAMPLE_PACKET_SIZE: usize = 38;
+pub const TIME_SYNC_REQUEST_SIZE: usize = 18;
+pub const TIME_SYNC_RESPONSE_SIZE: usize = 34;
 const MAGIC: u16 = 0x4950;
-const VERSION_V1: u8 = 1;
-const VERSION_V2: u8 = 2;
+const VERSION: u8 = 2;
 const TYPE_SAMPLE: u8 = 0x01;
 const TYPE_TIME_SYNC_REQUEST: u8 = 0x02;
 const TYPE_TIME_SYNC_RESPONSE: u8 = 0x03;
@@ -68,7 +66,7 @@ impl fmt::Display for MacAddress {
 pub struct SensorSample {
     pub device_mac: MacAddress,
     pub sequence: u32,
-    pub timestamp_us: u64,
+    pub timestamp_us: u32,
     pub raw_angle: u16,
     pub status: u8,
     pub clock_sync: Option<ClockSyncMetadata>,
@@ -77,7 +75,7 @@ pub struct SensorSample {
 #[derive(Clone, Copy, Debug)]
 pub struct ClockSyncMetadata {
     pub session_id: u64,
-    pub offset_us: i64,
+    pub offset_us: u32,
     pub round_trip_us: u32,
 }
 
@@ -85,7 +83,7 @@ pub struct ClockSyncMetadata {
 pub struct TimeSyncRequest {
     pub device_mac: MacAddress,
     pub sequence: u32,
-    pub device_t1_us: u64,
+    pub device_t1_us: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -139,60 +137,36 @@ pub fn decode_datagram(packet: &[u8]) -> Result<DecodedDatagram, DecodeError> {
     if u16::from_be_bytes([packet[0], packet[1]]) != MAGIC {
         return Err(DecodeError::Magic);
     }
+    if packet[2] != VERSION {
+        return Err(DecodeError::Version);
+    }
 
-    match (packet[2], packet[3]) {
-        (VERSION_V1, TYPE_SAMPLE) => decode_sample_v1(packet).map(DecodedDatagram::Sample),
-        (VERSION_V2, TYPE_SAMPLE) => decode_sample_v2(packet).map(DecodedDatagram::Sample),
-        (VERSION_V2, TYPE_TIME_SYNC_REQUEST) => {
+    match packet[3] {
+        TYPE_SAMPLE => decode_sample(packet).map(DecodedDatagram::Sample),
+        TYPE_TIME_SYNC_REQUEST => {
             decode_time_sync_request(packet).map(DecodedDatagram::TimeSyncRequest)
         }
-        (VERSION_V1 | VERSION_V2, _) => Err(DecodeError::PacketType),
-        _ => Err(DecodeError::Version),
+        _ => Err(DecodeError::PacketType),
     }
 }
 
-fn decode_sample_v1(packet: &[u8]) -> Result<SensorSample, DecodeError> {
-    if packet.len() != V1_SAMPLE_PACKET_SIZE {
+fn decode_sample(packet: &[u8]) -> Result<SensorSample, DecodeError> {
+    if packet.len() != SAMPLE_PACKET_SIZE {
         return Err(DecodeError::Length);
     }
-    decode_sample_fields(packet, None)
-}
 
-fn decode_sample_v2(packet: &[u8]) -> Result<SensorSample, DecodeError> {
-    if packet.len() != V2_SAMPLE_PACKET_SIZE {
-        return Err(DecodeError::Length);
-    }
-    let session_id = u64::from_be_bytes(packet[26..34].try_into().unwrap());
-    let offset_us = i64::from_be_bytes(packet[34..42].try_into().unwrap());
-    let round_trip_us = u32::from_be_bytes(packet[42..46].try_into().unwrap());
+    let session_id = u64::from_be_bytes(packet[22..30].try_into().unwrap());
     let clock_sync = (session_id != 0).then_some(ClockSyncMetadata {
         session_id,
-        offset_us,
-        round_trip_us,
+        offset_us: u32::from_be_bytes(packet[30..34].try_into().unwrap()),
+        round_trip_us: u32::from_be_bytes(packet[34..38].try_into().unwrap()),
     });
-    decode_sample_fields(packet, clock_sync)
-}
-
-fn decode_sample_fields(
-    packet: &[u8],
-    clock_sync: Option<ClockSyncMetadata>,
-) -> Result<SensorSample, DecodeError> {
-
-    let mac = MacAddress::from_octets([
-        packet[4], packet[5], packet[6], packet[7], packet[8], packet[9],
-    ]);
-    let sequence = u32::from_be_bytes([packet[10], packet[11], packet[12], packet[13]]);
-    let timestamp_us = u64::from_be_bytes([
-        packet[14], packet[15], packet[16], packet[17], packet[18], packet[19], packet[20],
-        packet[21],
-    ]);
-    let raw_angle = u16::from_be_bytes([packet[22], packet[23]]);
-    let status = packet[24];
+    let raw_angle = u16::from_be_bytes(packet[18..20].try_into().unwrap());
+    let status = packet[20];
 
     if status & !STATUS_KNOWN_BITS != 0 {
         return Err(DecodeError::Status);
     }
-
     let angle_is_valid = status & STATUS_ANGLE_VALID != 0;
     let i2c_error = status & STATUS_I2C_ERROR != 0;
     if angle_is_valid {
@@ -206,11 +180,10 @@ fn decode_sample_fields(
         return Err(DecodeError::Status);
     }
 
-    // Offset 25 is reserved and ignored by both protocol versions.
     Ok(SensorSample {
-        device_mac: mac,
-        sequence,
-        timestamp_us,
+        device_mac: read_mac(&packet[4..10]),
+        sequence: u32::from_be_bytes(packet[10..14].try_into().unwrap()),
+        timestamp_us: u32::from_be_bytes(packet[14..18].try_into().unwrap()),
         raw_angle,
         status,
         clock_sync,
@@ -222,29 +195,35 @@ fn decode_time_sync_request(packet: &[u8]) -> Result<TimeSyncRequest, DecodeErro
         return Err(DecodeError::Length);
     }
     Ok(TimeSyncRequest {
-        device_mac: MacAddress::from_octets([
-            packet[4], packet[5], packet[6], packet[7], packet[8], packet[9],
-        ]),
-        sequence: u32::from_be_bytes([packet[10], packet[11], packet[12], packet[13]]),
-        device_t1_us: u64::from_be_bytes(packet[14..22].try_into().unwrap()),
+        device_mac: read_mac(&packet[4..10]),
+        sequence: u32::from_be_bytes(packet[10..14].try_into().unwrap()),
+        device_t1_us: u32::from_be_bytes(packet[14..18].try_into().unwrap()),
     })
 }
 
 pub fn encode_time_sync_response(
     request: TimeSyncRequest,
-    server_t2_us: u64,
-    server_t3_us: u64,
+    server_t2_us: u32,
+    server_t3_us: u32,
     session_id: u64,
 ) -> [u8; TIME_SYNC_RESPONSE_SIZE] {
     let mut packet = [0_u8; TIME_SYNC_RESPONSE_SIZE];
-    packet[0..2].copy_from_slice(&MAGIC.to_be_bytes());
-    packet[2] = VERSION_V2;
-    packet[3] = TYPE_TIME_SYNC_RESPONSE;
+    write_header(&mut packet, TYPE_TIME_SYNC_RESPONSE);
     packet[4..10].copy_from_slice(&request.device_mac.octets());
     packet[10..14].copy_from_slice(&request.sequence.to_be_bytes());
-    packet[14..22].copy_from_slice(&request.device_t1_us.to_be_bytes());
-    packet[22..30].copy_from_slice(&server_t2_us.to_be_bytes());
-    packet[30..38].copy_from_slice(&server_t3_us.to_be_bytes());
-    packet[38..46].copy_from_slice(&session_id.to_be_bytes());
+    packet[14..18].copy_from_slice(&request.device_t1_us.to_be_bytes());
+    packet[18..22].copy_from_slice(&server_t2_us.to_be_bytes());
+    packet[22..26].copy_from_slice(&server_t3_us.to_be_bytes());
+    packet[26..34].copy_from_slice(&session_id.to_be_bytes());
     packet
+}
+
+fn read_mac(bytes: &[u8]) -> MacAddress {
+    MacAddress::from_octets(bytes.try_into().unwrap())
+}
+
+fn write_header(packet: &mut [u8], packet_type: u8) {
+    packet[0..2].copy_from_slice(&MAGIC.to_be_bytes());
+    packet[2] = VERSION;
+    packet[3] = packet_type;
 }

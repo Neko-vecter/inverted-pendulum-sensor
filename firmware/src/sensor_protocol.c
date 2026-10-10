@@ -14,13 +14,6 @@ static void write_u32_be(uint8_t *destination, uint32_t value)
     destination[3] = (uint8_t)value;
 }
 
-static void write_u64_be(uint8_t *destination, uint64_t value)
-{
-    for (size_t index = 0; index < 8; ++index) {
-        destination[index] = (uint8_t)(value >> (56U - (8U * index)));
-    }
-}
-
 static uint16_t read_u16_be(const uint8_t *source)
 {
     return (uint16_t)(((uint16_t)source[0] << 8) | source[1]);
@@ -62,13 +55,16 @@ size_t sensor_protocol_encode_sample(const sensor_sample_t *sample,
         packet[4U + index] = sample->mac[index];
     }
     write_u32_be(&packet[10], sample->sequence);
-    write_u64_be(&packet[14], sample->timestamp_us);
-    write_u16_be(&packet[22], sample->raw_angle);
-    packet[24] = sample->status;
-    packet[25] = 0;
-    write_u64_be(&packet[26], sample->sync_session_id);
-    write_u64_be(&packet[34], (uint64_t)sample->clock_offset_us);
-    write_u32_be(&packet[42], sample->sync_round_trip_us);
+    write_u32_be(&packet[14], sample->timestamp_us);
+    write_u16_be(&packet[18], sample->raw_angle);
+    packet[20] = sample->status;
+    packet[21] = 0;
+    for (size_t index = 0; index < 8U; ++index) {
+        packet[22U + index] = (uint8_t)(sample->sync_session_id >>
+                                        (56U - (8U * index)));
+    }
+    write_u32_be(&packet[30], sample->clock_offset_us);
+    write_u32_be(&packet[34], sample->sync_round_trip_us);
 
     return SENSOR_PROTOCOL_PACKET_SIZE;
 }
@@ -76,7 +72,7 @@ size_t sensor_protocol_encode_sample(const sensor_sample_t *sample,
 size_t sensor_protocol_encode_time_sync_request(
     const uint8_t mac[6],
     uint32_t sequence,
-    uint64_t device_t1_us,
+    uint32_t device_t1_us,
     uint8_t packet[SENSOR_PROTOCOL_SYNC_REQUEST_SIZE])
 {
     if (mac == NULL || packet == NULL) {
@@ -88,7 +84,7 @@ size_t sensor_protocol_encode_time_sync_request(
         packet[4U + index] = mac[index];
     }
     write_u32_be(&packet[10], sequence);
-    write_u64_be(&packet[14], device_t1_us);
+    write_u32_be(&packet[14], device_t1_us);
     return SENSOR_PROTOCOL_SYNC_REQUEST_SIZE;
 }
 
@@ -109,9 +105,9 @@ int sensor_protocol_decode_time_sync_response(
         response->mac[index] = packet[4U + index];
     }
     response->sequence = read_u32_be(&packet[10]);
-    response->device_t1_us = read_u64_be(&packet[14]);
-    response->server_t2_us = read_u64_be(&packet[22]);
-    response->server_t3_us = read_u64_be(&packet[30]);
-    response->server_session_id = read_u64_be(&packet[38]);
+    response->device_t1_us = read_u32_be(&packet[14]);
+    response->server_t2_us = read_u32_be(&packet[18]);
+    response->server_t3_us = read_u32_be(&packet[22]);
+    response->server_session_id = read_u64_be(&packet[26]);
     return 1;
 }

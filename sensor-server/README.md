@@ -1,9 +1,10 @@
 # Rust sensor server
 
-This MVP server listens for ESP32-C6 version 1 and version 2 UDP sample
-protocols, maps each packet's station MAC address to a logical sensor name,
-replies to version 2 time-sync requests, and reports each sensor's latest
-reading and reception statistics. The wire format is defined in
+This MVP server listens for the 38-byte ESP32-C6 version 2 UDP sample format,
+maps each packet's station MAC address to a logical sensor name, replies to
+version 2 time-sync requests, and reports each sensor's latest reading and
+reception statistics. The earlier 46-byte version 2 layout and version 1
+packets are not supported. The wire format is defined in
 [`../protocol/protocol.md`](../protocol/protocol.md).
 
 ## Configure
@@ -66,9 +67,10 @@ each ESP32 must target the server interface address and the same UDP port.
 Sequence-based loss is an estimate from received sequence numbers. It cannot
 distinguish network loss from samples omitted by the firmware before sending.
 Latency uses the device timestamp taken immediately before the MT6701 I2C read
-and a four-timestamp UDP clock-sync exchange. It is an estimate affected by
-round-trip path asymmetry and clock scheduling; version 1 samples have no
-latency estimate. The metric starts at the firmware timestamp before the I2C
-read and does not model or subtract MT6701 internal measurement delay. The
-server retains at most 50,000 latency samples per device per statistics
-interval for percentile calculation.
+and a four-timestamp UDP clock-sync exchange. Device and server wire times are
+32-bit wrapping microsecond counters; modular differences are unambiguous for
+intervals below 2^31 microseconds. The server time origin is captured at the
+start of main. Latency is an estimate affected by round-trip path asymmetry and
+clock scheduling. The metric does not model or subtract MT6701 internal
+measurement delay. The server retains at most 50,000 latency samples per device
+per statistics interval for percentile calculation.
