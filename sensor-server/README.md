@@ -6,7 +6,7 @@ This MVP server listens for the 38-byte ESP32 version 2 UDP sample format, maps 
 
 Copy the example file to a local configuration file:
 
-```shell
+```sh
 cp config.example.toml config.toml
 ```
 
@@ -29,7 +29,7 @@ stats_interval_secs = 1
 
 From this directory:
 
-```powershell
+```sh
 cargo run --release -- --config config.toml
 ```
 
@@ -46,3 +46,9 @@ The host firewall must allow incoming UDP traffic on the configured port, and ea
 - Sensor I2C errors, malformed datagrams, unknown MAC addresses, and socket receive errors.
 
 Sequence-based loss is an estimate from received sequence numbers. It cannot distinguish network loss from samples omitted by the firmware before sending. Latency uses the device timestamp taken immediately before the MT6701 I2C read and a four-timestamp UDP clock-sync exchange. Device and server wire times are 32-bit wrapping microsecond counters; modular differences are unambiguous for intervals below 2^31 microseconds. The server time origin is captured at the start of main. Latency is an estimate affected by round-trip path asymmetry and clock scheduling. The metric does not model or subtract MT6701 internal measurement delay. The server retains at most 50,000 latency samples per device per statistics interval for percentile calculation.
+
+## build
+
+```sh
+cargo build
+```
