@@ -27,10 +27,9 @@ Edit the `CONFIG_SENSOR_*` entries in `sdkconfig.local` to set Wi-Fi credentials
 
 The Seeed C5 board definition selects `default_8MB.csv`; this project includes that partition table in the `firmware` directory. It provides two OTA app slots, SPIFFS storage, and a coredump partition.
 
-The local file is an `SDKCONFIG_DEFAULTS` fragment, not the generated full ESP-IDF configuration. Both PlatformIO environments use it; PlatformIO writes the generated C6 configuration under `.pio/build/seeed_xiao_esp32c6/` and the C5 configuration under `.pio/build/seeed-xiao-esp32-c5/`. Clean and rebuild the matching environment after editing the shared local file so ESP-IDF applies the new values:
+The local file is an `SDKCONFIG_DEFAULTS` fragment, not the generated full ESP-IDF configuration. Both PlatformIO environments use it; PlatformIO writes the generated C6 configuration under `.pio/build/seeed_xiao_esp32c6/` and the C5 configuration under `.pio/build/seeed-xiao-esp32-c5/`. CMake watches `sdkconfig.local`, so changing it triggers ESP-IDF reconfiguration and an incremental rebuild of the objects and components affected by the changed settings. A clean build is not needed:
 
 ```shell
-pio run -e seeed_xiao_esp32c6 -t clean
 pio run -e seeed_xiao_esp32c6
 pio run -e seeed_xiao_esp32c6 -t upload
 pio device monitor -e seeed_xiao_esp32c6
