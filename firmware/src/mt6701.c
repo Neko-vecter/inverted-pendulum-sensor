@@ -1,11 +1,15 @@
 #include "mt6701.h"
 
 #include "driver/gpio.h"
+#include "freertos/FreeRTOS.h"
 
 #define MT6701_I2C_ADDRESS 0x06
 #define MT6701_ANGLE_HIGH_REGISTER 0x03
 #define MT6701_ANGLE_LOW_REGISTER 0x04
-#define MT6701_XFER_TIMEOUT_MS 2
+/* I2C converts milliseconds to ticks; keep this at two full RTOS ticks. */
+#define MT6701_XFER_TIMEOUT_TICKS 2U
+#define MT6701_XFER_TIMEOUT_MS \
+    ((MT6701_XFER_TIMEOUT_TICKS * 1000U + configTICK_RATE_HZ - 1U) / configTICK_RATE_HZ)
 
 esp_err_t mt6701_init(int sda_gpio,
                       int scl_gpio,

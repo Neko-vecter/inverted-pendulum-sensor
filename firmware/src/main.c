@@ -578,7 +578,7 @@ static void sample_timer_callback(void *argument)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Starting ESP32-C6 MT6701 sensor node");
+    ESP_LOGI(TAG, "Starting ESP32 MT6701 sensor node");
 
     esp_err_t err = esp_read_mac(s_station_mac, ESP_MAC_WIFI_STA);
     const bool station_mac_valid = err == ESP_OK;

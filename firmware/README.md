@@ -1,98 +1,59 @@
-# ESP32-C6 sensor firmware
+# ESP32 MT6701 sensor firmware
 
-This PlatformIO project samples one MT6701 over I²C and sends one UDP sample
-datagram per 1 ms sampling tick when Wi-Fi is connected. Version 2 packets
-include clock-sync metadata and a 32-bit wrapping microsecond counter; all
-nodes use the same firmware. The Wi-Fi station
-MAC carried in each packet identifies the node; the Rust server assigns its
-logical sensor name from its own configuration.
+This PlatformIO project supports the Seeed Studio XIAO ESP32-C6 and XIAO ESP32-C5. It samples one MT6701 over I2C and sends one UDP sample datagram per 1 ms sampling tick when Wi-Fi is connected. Version 2 packets include clock-sync metadata and a 32-bit wrapping microsecond counter; both boards use the same firmware. The Wi-Fi station MAC carried in each packet identifies the node; the Rust server assigns its logical sensor name from its own configuration.
 
 ## Wiring
 
-For the Seeed Studio XIAO ESP32-C6 board, the defaults are:
+The default MT6701 wiring uses D4/D5 on either board. The GPIO numbers differ:
 
-| XIAO pin | ESP32-C6 GPIO | MT6701 |
-|---|---:|---|
-| 3V3 | — | VCC/VDD |
-| GND | — | GND |
-| D4 / SDA | 22 | SDA |
-| D5 / SCL | 23 | SCL |
+| XIAO pin | MT6701  | ESP32-C6 GPIO | ESP32-C5 GPIO |
+| -------- | ------- | ------------: | ------------: |
+| 3V3      | VCC/VDD |             - |             - |
+| GND      | GND     |             - |             - |
+| D4 / SDA | SDA     |            22 |            23 |
+| D5 / SCL | SCL     |            23 |            24 |
 
-Use a 3.3 V-compatible MT6701 breakout. I²C needs pull-up resistors on SDA
-and SCL; use the breakout's pull-ups or add external pull-ups if it has none.
-The firmware enables the ESP32-C6 internal pull-ups as a convenience, but they
-may be too weak for reliable operation at 400 kHz on some wiring.
+Use a 3.3 V-compatible MT6701 breakout. I2C needs pull-up resistors on SDA and SCL; use the breakout's pull-ups or add external pull-ups if it has none. The firmware enables the ESP32 internal pull-ups as a convenience, but they may be too weak for reliable operation at 400 kHz on some wiring.
 
 ## Local configuration and build
 
-From `firmware`, create the ignored local configuration once:
+Each environment uses a separate ignored local configuration so the board's default I2C pins do not conflict. From `firmware`, copy the template for the board you are building:
 
 ```shell
+# XIAO ESP32-C6
 cp sdkconfig.example.local sdkconfig.local
+# XIAO ESP32-C5
+cp sdkconfig.example.c5.local sdkconfig.c5.local
 ```
 
-Edit only the `CONFIG_SENSOR_*` entries in `sdkconfig.local` for Wi-Fi
-credentials, server IPv4 address/UDP port, or sensor I²C pins/clock. This file
-is ignored by Git. The example shows all project-specific options; their
-normal defaults are also defined in `src/Kconfig.projbuild`. Other settings
-come from PlatformIO's board configuration and ESP-IDF defaults. A WPA2
-passphrase must be 8-63 bytes, or a 64-digit hexadecimal pre-shared key; an
-empty password selects an open network.
+Edit the `CONFIG_SENSOR_*` entries in the configuration file for the board you are building. Set Wi-Fi credentials, server IPv4 address/UDP port, or the sensor I2C pins/clock as needed. `sdkconfig.local` defaults to the C6 pins GPIO22/23; `sdkconfig.c5.local` defaults to the C5 pins GPIO23/24 and selects the board's 8 MB flash. Keep `CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y` in the C5 file. If you copied `sdkconfig.c5.local` before this setting was added, add that line without replacing your other settings. Both local files are ignored by Git. A WPA2 passphrase must be 8-63 bytes, or a 64-digit hexadecimal pre-shared key; an empty password selects an open network.
 
-The local file is an `SDKCONFIG_DEFAULTS` fragment, not the generated full
-ESP-IDF configuration. PlatformIO writes that full configuration under
-`.pio/build/seeed_xiao_esp32c6/`, which is also ignored by Git. After editing
-`sdkconfig.local`, run `pio run -t clean` and then `pio run` so the new local
-values are applied while ESP-IDF regenerates its full configuration. Use
-`pio run -t upload` to flash and `pio device monitor` to view logs.
+The Seeed C5 board definition selects `default_8MB.csv`; this project includes that partition table in the `firmware` directory. It provides two OTA app slots, SPIFFS storage, and a coredump partition.
 
-If Wi-Fi associates with the AP but repeatedly disconnects with reason `15`,
-ESP-IDF reports a four-way handshake timeout. Check that the local WPA2
-passphrase is correct. Editing `sdkconfig.local` does not update an existing
-generated configuration or an already-flashed image; clean, rebuild, and
-upload after changing Wi-Fi credentials. The disconnect log now includes a
-short reason description and never prints the passphrase.
+These local files are `SDKCONFIG_DEFAULTS` fragments, not the generated full ESP-IDF configurations. PlatformIO writes the generated C6 configuration under `.pio/build/seeed_xiao_esp32c6/` and the C5 configuration under `.pio/build/seeed-xiao-esp32-c5/`. Clean and rebuild the matching environment after editing its local file so ESP-IDF applies the new values:
 
-In ESP-IDF Wi-Fi logs, `authmode:0x3` means WPA2-PSK. The cipher value `0x3`
-means TKIP, which is deprecated; configure the AP for WPA2-Personal with
-AES/CCMP where possible.
+```shell
+pio run -e seeed_xiao_esp32c6 -t clean
+pio run -e seeed_xiao_esp32c6
+pio run -e seeed_xiao_esp32c6 -t upload
+pio device monitor -e seeed_xiao_esp32c6
+```
 
-At startup, the firmware prints the compiled UDP destination. It sends a
-four-timestamp clock-sync request about once per second and includes the
-estimated modular server clock offset and sync round-trip time in each version
-2 sample.
-The periodic `send errors` count is for sample `sendto` failures;
-`sync send errors` counts time-sync request failures. Neither confirms remote
-delivery. Use server sequence gaps to observe samples not received by the
-server.
+Use `seeed-xiao-esp32-c5` instead of `seeed_xiao_esp32c6` for the C5. `pio run -t menuconfig` edits the generated full configuration; keep local overrides in the corresponding ignored file. With an empty SSID, the node still samples and logs but does not start Wi-Fi or send UDP packets.
 
-`pio run -t menuconfig` edits the generated full configuration. To keep local
-changes in the small ignored file, edit `sdkconfig.local` as the source of
-truth. With an empty SSID, the node still samples and logs but does not start
-Wi-Fi or send UDP packets.
+If Wi-Fi associates with the AP but repeatedly disconnects with reason `15`, ESP-IDF reports a four-way handshake timeout. Check that the local WPA2 passphrase is correct. Editing a local config file does not update an existing generated configuration or an already-flashed image; clean, rebuild, and upload after changing Wi-Fi credentials. The disconnect log includes a short reason description and never prints the passphrase.
 
-The serial log prints the station MAC. Add that MAC to the Rust server's device
-mapping configuration to assign the node a logical role. The firmware does
-not contain a per-node numeric ID and does not receive configuration from the
-server.
-If the station MAC cannot be read, Wi-Fi/UDP are disabled so the node cannot
-send samples with an invalid all-zero device identity; sensor sampling can
-still run.
+In ESP-IDF Wi-Fi logs, `authmode:0x3` means WPA2-PSK. The cipher value `0x3` means TKIP, which is deprecated; configure the AP for WPA2-Personal with AES/CCMP where possible.
+
+At startup, the firmware prints the compiled UDP destination. It sends a four-timestamp clock-sync request about once per second and includes the estimated modular server clock offset and sync round-trip time in each version 2 sample. The periodic `send errors` count is for sample `sendto` failures; `sync send errors` counts time-sync request failures. Neither confirms remote delivery. Use server sequence gaps to observe samples not received by the server.
+
+The serial log prints the station MAC. Add that MAC to the Rust server's device mapping configuration to assign the node a logical role. The firmware does not contain a per-node numeric ID and does not receive configuration from the server. If the station MAC cannot be read, Wi-Fi/UDP are disabled so the node cannot send samples with an invalid all-zero device identity; sensor sampling can still run.
 
 ## Implementation notes
 
-- The ESP high-resolution timer notifies a dedicated sampling task every
-  1,000 µs. The task reads MT6701 registers `0x03` then `0x04` over I²C.
-- A bounded queue separates acquisition from the nonblocking UDP sender. If
-  Wi-Fi is down, the queue is cleared and acquisition continues. Sequence
-  numbers therefore expose outages and local transmit drops to the receiver.
-- The sample timestamp is taken immediately before the MT6701 I²C read.
-  Latency starts at this timestamp; firmware does not model or subtract
-  MT6701 internal measurement delay. Clock offset is refreshed through the
-  server's UDP time-sync exchange.
-- The sampler reports an estimated rate and counts for I²C errors, missed timer
-  slots, full-queue drops, and samples taken while Wi-Fi is unavailable every
-  five seconds.
-- Sampling is a 1 kHz target. Wi-Fi scheduling, I²C errors, and queue pressure
-  can reduce the delivered rate; UDP does not retransmit lost packets.
+- The ESP high-resolution timer notifies a dedicated sampling task every 1,000 us. The task reads MT6701 registers `0x03` then `0x04` over I2C.
+- A bounded queue separates acquisition from the nonblocking UDP sender. If Wi-Fi is down, the queue is cleared and acquisition continues. Sequence numbers therefore expose outages and local transmit drops to the receiver.
+- The sample timestamp is taken immediately before the MT6701 I2C read. Latency starts at this timestamp; firmware does not model or subtract MT6701 internal measurement delay. Clock offset is refreshed through the server's UDP time-sync exchange.
+- The sampler reports an estimated rate and counts for I2C errors, missed timer slots, full-queue drops, and samples taken while Wi-Fi is unavailable every five seconds.
+- Sampling is a 1 kHz target. Wi-Fi scheduling, I2C errors, and queue pressure can reduce the delivered rate; UDP does not retransmit lost packets.
 - The wire format is documented in [`protocol/protocol.md`](../protocol/protocol.md).

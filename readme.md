@@ -16,7 +16,7 @@ This project uses **ESP32 + Wi-Fi** to transmit pendulum angle measurements to a
 | Hardware | Status    |
 | -------- | --------- |
 | ESP32-C6 | Supported |
-| ESP32-C5 | Planned   |
+| ESP32-C5 | Supported |
 
 ## Project Scope
 
