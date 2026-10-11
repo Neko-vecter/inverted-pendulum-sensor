@@ -17,20 +17,17 @@ Use a 3.3 V-compatible MT6701 breakout. I2C needs pull-up resistors on SDA and S
 
 ## Local configuration and build
 
-Each environment uses a separate ignored local configuration so the board's default I2C pins do not conflict. From `firmware`, copy the template for the board you are building:
+Both environments share one ignored local configuration for Wi-Fi credentials and the UDP server. From `firmware`, copy the template once:
 
 ```shell
-# XIAO ESP32-C6
 cp sdkconfig.example.local sdkconfig.local
-# XIAO ESP32-C5
-cp sdkconfig.example.c5.local sdkconfig.c5.local
 ```
 
-Edit the `CONFIG_SENSOR_*` entries in the local file to set Wi-Fi credentials and the UDP server IPv4 address/port. I2C pins and clock are fixed by each PlatformIO environment's compile flags: C6 uses GPIO22/23 at 400 kHz, and C5 uses GPIO23/24 at 400 kHz. `sdkconfig.c5.local` selects the board's 8 MB flash; keep `CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y` in that file. Both local files are ignored by Git. A WPA2 passphrase must be 8-63 bytes, or a 64-digit hexadecimal pre-shared key; an empty password selects an open network.
+Edit the `CONFIG_SENSOR_*` entries in `sdkconfig.local` to set Wi-Fi credentials and the UDP server IPv4 address/port. I2C pins and clock are fixed by each PlatformIO environment's compile flags: C6 uses GPIO22/23 at 400 kHz, and C5 uses GPIO23/24 at 400 kHz. CMake selects the C5 board's 8 MB flash setting when building for `esp32c5`; it does not need to be in the local sdkconfig file. `sdkconfig.local` is ignored by Git. A WPA2 passphrase must be 8-63 bytes, or a 64-digit hexadecimal pre-shared key; an empty password selects an open network.
 
 The Seeed C5 board definition selects `default_8MB.csv`; this project includes that partition table in the `firmware` directory. It provides two OTA app slots, SPIFFS storage, and a coredump partition.
 
-These local files are `SDKCONFIG_DEFAULTS` fragments, not the generated full ESP-IDF configurations. PlatformIO writes the generated C6 configuration under `.pio/build/seeed_xiao_esp32c6/` and the C5 configuration under `.pio/build/seeed-xiao-esp32-c5/`. Clean and rebuild the matching environment after editing its local file so ESP-IDF applies the new values:
+The local file is an `SDKCONFIG_DEFAULTS` fragment, not the generated full ESP-IDF configuration. Both PlatformIO environments use it; PlatformIO writes the generated C6 configuration under `.pio/build/seeed_xiao_esp32c6/` and the C5 configuration under `.pio/build/seeed-xiao-esp32-c5/`. Clean and rebuild the matching environment after editing the shared local file so ESP-IDF applies the new values:
 
 ```shell
 pio run -e seeed_xiao_esp32c6 -t clean
