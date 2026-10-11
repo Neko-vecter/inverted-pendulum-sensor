@@ -592,9 +592,9 @@ void app_main(void)
                  (unsigned)s_station_mac[4], (unsigned)s_station_mac[5]);
     }
 
-    const esp_err_t sensor_err = mt6701_init(CONFIG_SENSOR_I2C_SDA_GPIO,
-                                             CONFIG_SENSOR_I2C_SCL_GPIO,
-                                             CONFIG_SENSOR_I2C_CLOCK_HZ,
+    const esp_err_t sensor_err = mt6701_init(SENSOR_I2C_SDA_GPIO,
+                                             SENSOR_I2C_SCL_GPIO,
+                                             SENSOR_I2C_CLOCK_HZ,
                                              &s_i2c_bus,
                                              &s_mt6701);
     if (sensor_err != ESP_OK) {
@@ -649,6 +649,6 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_timer_start_periodic(s_sample_timer, SAMPLE_PERIOD_US));
     ESP_LOGI(TAG, "Sampling started: %u Hz target; I2C SDA=%d SCL=%d",
              1000000U / SAMPLE_PERIOD_US,
-             CONFIG_SENSOR_I2C_SDA_GPIO,
-             CONFIG_SENSOR_I2C_SCL_GPIO);
+             SENSOR_I2C_SDA_GPIO,
+             SENSOR_I2C_SCL_GPIO);
 }

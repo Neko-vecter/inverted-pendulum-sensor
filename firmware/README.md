@@ -26,7 +26,7 @@ cp sdkconfig.example.local sdkconfig.local
 cp sdkconfig.example.c5.local sdkconfig.c5.local
 ```
 
-Edit the `CONFIG_SENSOR_*` entries in the configuration file for the board you are building. Set Wi-Fi credentials, server IPv4 address/UDP port, or the sensor I2C pins/clock as needed. `sdkconfig.local` defaults to the C6 pins GPIO22/23; `sdkconfig.c5.local` defaults to the C5 pins GPIO23/24 and selects the board's 8 MB flash. Keep `CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y` in the C5 file. If you copied `sdkconfig.c5.local` before this setting was added, add that line without replacing your other settings. Both local files are ignored by Git. A WPA2 passphrase must be 8-63 bytes, or a 64-digit hexadecimal pre-shared key; an empty password selects an open network.
+Edit the `CONFIG_SENSOR_*` entries in the local file to set Wi-Fi credentials and the UDP server IPv4 address/port. I2C pins and clock are fixed by each PlatformIO environment's compile flags: C6 uses GPIO22/23 at 400 kHz, and C5 uses GPIO23/24 at 400 kHz. `sdkconfig.c5.local` selects the board's 8 MB flash; keep `CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y` in that file. Both local files are ignored by Git. A WPA2 passphrase must be 8-63 bytes, or a 64-digit hexadecimal pre-shared key; an empty password selects an open network.
 
 The Seeed C5 board definition selects `default_8MB.csv`; this project includes that partition table in the `firmware` directory. It provides two OTA app slots, SPIFFS storage, and a coredump partition.
 

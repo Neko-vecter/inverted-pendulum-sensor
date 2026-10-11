@@ -23,19 +23,4 @@ config SENSOR_SERVER_PORT
     range 1 65535
     default 5000
 
-config SENSOR_I2C_SDA_GPIO
-    int "MT6701 I2C SDA GPIO"
-    range 0 30
-    default 22
-
-config SENSOR_I2C_SCL_GPIO
-    int "MT6701 I2C SCL GPIO"
-    range 0 30
-    default 23
-
-config SENSOR_I2C_CLOCK_HZ
-    int "MT6701 I2C clock (Hz)"
-    range 100000 400000
-    default 400000
-
 endmenu
