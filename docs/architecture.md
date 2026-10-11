@@ -129,41 +129,36 @@ flowchart TD
 
 ### Transport Configuration
 
-| Parameter | Value |
-|---|---|
-| Transport | UDP / IPv4 |
-| Network | Wi-Fi |
-| Server Listen Port | 5000 (default) |
+| Parameter                | Value                                                 |
+| ------------------------ | ----------------------------------------------------- |
+| Transport                | UDP / IPv4                                            |
+| Network                  | Wi-Fi                                                 |
+| Server Listen Port       | 5000 (default)                                        |
 | Firmware UDP Destination | Configurable per node; must match the server listener |
-| Sampling Rate | 1000 Hz per node (target) |
-| Transmission Mode | One packet per sample |
-| Packet Size | 38-byte version 2 sample |
-| Byte Order | Big Endian |
-| Retransmission | Disabled |
+| Sampling Rate            | 1000 Hz per node (target)                             |
+| Transmission Mode        | One packet per sample                                 |
+| Packet Size              | 38-byte version 2 sample                              |
+| Byte Order               | Big Endian                                            |
+| Retransmission           | Disabled                                              |
 
 ### Packet Format
 
-| Offset | Field | Type | Size |
-|---|---|---|---|
-| 0 | `magic` | uint16 | 2 bytes |
-| 2 | `version` | uint8 | 1 byte |
-| 3 | `packet_type` | uint8 | 1 byte |
-| 4 | `device_mac` | byte[6] | 6 bytes |
-| 10 | `sequence` | uint32 | 4 bytes |
-| 14 | `timestamp_us` | uint32 | 4 bytes |
-| 18 | `raw_angle` | uint16 | 2 bytes |
-| 20 | `status` | uint8 | 1 byte |
-| 21 | `reserved` | uint8 | 1 byte |
-| 22 | `sync_session_id` | uint64 | 8 bytes |
-| 30 | `clock_offset_us` | uint32 | 4 bytes |
-| 34 | `sync_round_trip_us` | uint32 | 4 bytes |
+| Offset | Field                | Type    | Size    |
+| ------ | -------------------- | ------- | ------- |
+| 0      | `magic`              | uint16  | 2 bytes |
+| 2      | `version`            | uint8   | 1 byte  |
+| 3      | `packet_type`        | uint8   | 1 byte  |
+| 4      | `device_mac`         | byte[6] | 6 bytes |
+| 10     | `sequence`           | uint32  | 4 bytes |
+| 14     | `timestamp_us`       | uint32  | 4 bytes |
+| 18     | `raw_angle`          | uint16  | 2 bytes |
+| 20     | `status`             | uint8   | 1 byte  |
+| 21     | `reserved`           | uint8   | 1 byte  |
+| 22     | `sync_session_id`    | uint64  | 8 bytes |
+| 30     | `clock_offset_us`    | uint32  | 4 bytes |
+| 34     | `sync_round_trip_us` | uint32  | 4 bytes |
 
-**Version 2 sample size: 38 bytes.** The device and server use 32-bit wrapping
-microsecond counters, with modular comparisons limited to intervals below
-2^31 microseconds. The server's monotonic time origin is captured at the start
-of `main`. The previous 46-byte version 2 format and version 1 packets are not
-accepted. See [`protocol/protocol.md`](../protocol/protocol.md) for timestamp,
-sync, and latency formulas.
+**Version 2 sample size: 38 bytes.** The device and server use 32-bit wrapping microsecond counters, with modular comparisons limited to intervals below 2^31 microseconds. The server's monotonic time origin is captured at the start of `main`. The previous 46-byte version 2 format and version 1 packets are not accepted. See [`protocol/protocol.md`](../protocol/protocol.md) for timestamp, sync, and latency formulas.
 
 The `timestamp_us` field is the low 32 bits of the ESP32's local monotonic time at the start of the MT6701 I2C read. A UDP time-sync exchange estimates each node's modular offset from the server's monotonic clock. The server uses the offset and matching session ID to calculate per-device sample-to-receive latency percentiles. The metric does not model or subtract MT6701 internal measurement delay. See [`protocol/protocol.md`](../protocol/protocol.md) for field semantics and status bits.
 
