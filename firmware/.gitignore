@@ -4,3 +4,5 @@ sdkconfig.c5.local
 /sdkconfig.seeed_xiao_esp32c6
 /sdkconfig.seeed_xiao_esp32c5
 /.vscode
+/.venv
+/venv
