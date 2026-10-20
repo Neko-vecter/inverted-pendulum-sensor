@@ -1,20 +1,20 @@
 mod config;
 mod protocol;
+mod serial_frame;
 mod state;
+mod transport;
 
 use crate::protocol::{DecodedDatagram, decode_datagram, encode_time_sync_response};
 use crate::state::{
     DeviceRegistry, DeviceState, ServerMetrics, format_rate, latency_percentiles_us,
 };
+use crate::transport::Transport;
 use std::env;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-const UDP_BUFFER_SIZE: usize = 2048;
-const SOCKET_READ_TIMEOUT: Duration = Duration::from_millis(100);
 
 fn main() {
     let server_start = Instant::now();
@@ -73,17 +73,9 @@ fn run(config_path: &std::path::Path, server_start: Instant) -> Result<(), Strin
         .as_micros()
         .min(u128::from(u64::MAX)) as u64;
     let server_session_id = server_session_id.max(1);
-    let socket = UdpSocket::bind(config.bind_address)
-        .map_err(|error| format!("cannot bind UDP {}: {error}", config.bind_address))?;
-    socket
-        .set_read_timeout(Some(SOCKET_READ_TIMEOUT))
-        .map_err(|error| format!("cannot set UDP receive timeout: {error}"))?;
-
-    let local_address = socket
-        .local_addr()
-        .map_err(|error| format!("cannot read bound UDP address: {error}"))?;
+    let mut transport = Transport::open(&config.transport)?;
     println!(
-        "sensor-server listening on {local_address}; protocol v2, {} configured device(s)",
+        "protocol v2, {} configured device(s)",
         config.devices_by_mac.len()
     );
     println!("time-sync session: {server_session_id}");
@@ -92,26 +84,26 @@ fn run(config_path: &std::path::Path, server_start: Instant) -> Result<(), Strin
 
     let mut devices = DeviceRegistry::new(config.devices_by_mac);
     let mut metrics = ServerMetrics::default();
-    let mut buffer = vec![0_u8; UDP_BUFFER_SIZE];
     let mut interval_started = Instant::now();
 
     loop {
-        match socket.recv_from(&mut buffer) {
-            Ok((length, sender)) => {
-                let received_at = Instant::now();
+        match transport.receive() {
+            Ok(Some(packet)) => {
+                let received_at = packet.received_at;
                 let server_now_us = monotonic_us(server_start, received_at) as u32;
                 handle_datagram(
-                    &buffer[..length],
-                    sender,
+                    &packet.data,
+                    packet.sender,
                     received_at,
                     server_now_us,
                     server_start,
                     server_session_id,
-                    &socket,
+                    &mut transport,
                     &mut devices,
                     &mut metrics,
                 );
             }
+            Ok(None) => {}
             Err(error)
                 if matches!(
                     error.kind(),
@@ -120,6 +112,11 @@ fn run(config_path: &std::path::Path, server_start: Instant) -> Result<(), Strin
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) => {
                 metrics.record_receive_error();
+                if matches!(transport, Transport::Serial { .. }) {
+                    return Err(format!(
+                        "ESP-NOW serial receive failed: {error}; reconnect the gateway and restart"
+                    ));
+                }
                 eprintln!("UDP receive error: {error}");
                 thread::sleep(Duration::from_millis(100));
             }
@@ -129,6 +126,12 @@ fn run(config_path: &std::path::Path, server_start: Instant) -> Result<(), Strin
         let elapsed = now.duration_since(interval_started);
         if elapsed >= config.stats_interval {
             print_stats(elapsed, now, &mut devices, &mut metrics);
+            if matches!(transport, Transport::Serial { .. }) {
+                println!(
+                    "  serial framing errors total={}",
+                    transport.framing_errors()
+                );
+            }
             interval_started = now;
         }
     }
@@ -136,12 +139,12 @@ fn run(config_path: &std::path::Path, server_start: Instant) -> Result<(), Strin
 
 fn handle_datagram(
     packet: &[u8],
-    sender: SocketAddr,
+    sender: Option<SocketAddr>,
     received_at: Instant,
     server_now_us: u32,
     server_start: Instant,
     server_session_id: u64,
-    socket: &UdpSocket,
+    transport: &mut Transport,
     devices: &mut DeviceRegistry,
     metrics: &mut ServerMetrics,
 ) {
@@ -156,12 +159,7 @@ fn handle_datagram(
     match datagram {
         DecodedDatagram::Sample(sample) => {
             metrics.record_decoded();
-            if devices.record(
-                sample,
-                received_at,
-                server_now_us,
-                server_session_id,
-            ) {
+            if devices.record(sample, received_at, server_now_us, server_session_id) {
                 metrics.record_mapped();
             } else {
                 metrics.record_unknown(sample.device_mac);
@@ -172,14 +170,10 @@ fn handle_datagram(
                 return;
             }
             let server_t3_us = monotonic_us(server_start, Instant::now()) as u32;
-            let response = encode_time_sync_response(
-                request,
-                server_now_us,
-                server_t3_us,
-                server_session_id,
-            );
-            if let Err(error) = socket.send_to(&response, sender) {
-                eprintln!("UDP time-sync response to {sender} failed: {error}");
+            let response =
+                encode_time_sync_response(request, server_now_us, server_t3_us, server_session_id);
+            if let Err(error) = transport.respond(&response, sender) {
+                eprintln!("time-sync response failed: {error}");
             }
         }
     }
@@ -263,10 +257,7 @@ fn print_device_stats(state: &mut DeviceState, elapsed: Duration, now: Instant) 
         ),
         None => format!(
             "latency_ms n/a samples={} sync_rtt_us={} unsynced={} clock_ahead={}",
-            latency_total_samples,
-            sync_rtt,
-            latency_unsynced,
-            latency_clock_ahead
+            latency_total_samples, sync_rtt, latency_unsynced, latency_clock_ahead
         ),
     };
     let loss = state
@@ -309,4 +300,88 @@ fn print_device_stats(state: &mut DeviceState, elapsed: Duration, now: Instant) 
         state.restarts,
         state.sensor_errors
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::MacAddress;
+    use std::collections::HashMap;
+    use std::net::UdpSocket;
+
+    #[test]
+    fn udp_sync_exchange_and_framed_sample_use_existing_device_state() {
+        let mac = MacAddress::from_octets([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 1]);
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let address = socket.local_addr().unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut transport = Transport::Udp(socket);
+        let mut devices = DeviceRegistry::new(HashMap::from([(mac, "sensor_1".to_owned())]));
+        let mut metrics = ServerMetrics::default();
+        let start = Instant::now();
+        let mut request = vec![0x49, 0x50, 2, 2];
+        request.extend(mac.octets());
+        request.extend(42_u32.to_be_bytes());
+        request.extend(1000_u32.to_be_bytes());
+        client.send_to(&request, address).unwrap();
+        let received = transport.receive().unwrap().unwrap();
+        handle_datagram(
+            &received.data,
+            received.sender,
+            received.received_at,
+            1100,
+            start,
+            7,
+            &mut transport,
+            &mut devices,
+            &mut metrics,
+        );
+        let mut response = [0; 64];
+        let size = client.recv(&mut response).unwrap();
+        assert_eq!(size, protocol::TIME_SYNC_RESPONSE_SIZE);
+        assert_eq!(
+            &response[..18],
+            &[&request[..3], &[3], &request[4..]].concat()
+        );
+        assert_eq!(&response[18..22], &1100_u32.to_be_bytes());
+        assert_eq!(&response[26..34], &7_u64.to_be_bytes());
+
+        // A gateway-framed sample reaches the same state/latency path as UDP.
+        let mut sample = vec![0x49, 0x50, 2, 1];
+        sample.extend(mac.octets());
+        sample.extend(1_u32.to_be_bytes());
+        sample.extend(1000_u32.to_be_bytes());
+        sample.extend(4096_u16.to_be_bytes());
+        sample.extend([1, 0]);
+        sample.extend(7_u64.to_be_bytes());
+        sample.extend(100_u32.to_be_bytes());
+        sample.extend(200_u32.to_be_bytes());
+        let mut decoder = serial_frame::Decoder::default();
+        let packet = serial_frame::encode(&sample)
+            .into_iter()
+            .find_map(|byte| decoder.push(byte))
+            .unwrap();
+        handle_datagram(
+            &packet,
+            None,
+            Instant::now(),
+            1300,
+            start,
+            7,
+            &mut transport,
+            &mut devices,
+            &mut metrics,
+        );
+        let state = &devices.by_name["sensor_1"];
+        assert_eq!(state.received_total, 1);
+        assert_eq!(state.latest.unwrap().sample.angle_degrees(), Some(90.0));
+        assert_eq!(state.latency_samples_us, [200]);
+        assert_eq!(metrics.mapped_total, 1);
+    }
 }

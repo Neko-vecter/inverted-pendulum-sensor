@@ -1,7 +1,15 @@
 [server]
-# Listen on all IPv4 interfaces, UDP port 5000.
+mode = "espnow" # "espnow" (gateway serial) or "udp" (direct Wi-Fi).
+# Used only in UDP mode.
 bind_address = "0.0.0.0:5000"
 stats_interval_secs = 1
+
+# Gateway settings used in ESP-NOW mode.
+# Use a stable /dev/serial/by-id/... path on Linux, or e.g. "COM7" on Windows.
+# Set server.mode = "udp" to use Wi-Fi / UDP instead.
+[gateway]
+serial = "/dev/ttyACM0"
+baud_rate = 921600 # Optional; match the gateway for an external UART adapter.
 
 # Map each sensor's Wi-Fi station MAC to its logical name.
 # Replace these example MAC addresses with the values printed by the firmware.

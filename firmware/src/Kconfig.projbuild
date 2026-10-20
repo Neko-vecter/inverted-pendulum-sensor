@@ -1,5 +1,23 @@
 menu "Pendulum sensor"
 
+config SENSOR_ESPNOW
+    bool "Use ESP-NOW instead of Wi-Fi / UDP"
+    default y
+    help
+        Send samples through an ESP-NOW USB gateway. The AP connection,
+        reconnection task, IP configuration and UDP code are excluded.
+        The Wi-Fi radio driver is still required by ESP-NOW.
+
+config SENSOR_ESPNOW_CHANNEL
+    int "ESP-NOW radio channel"
+    depends on SENSOR_ESPNOW
+    range 1 11
+    default 1
+    help
+        Must match the gateway channel. No access point is required.
+
+if !SENSOR_ESPNOW
+
 config SENSOR_WIFI_SSID
     string "Wi-Fi SSID"
     default ""
@@ -22,5 +40,7 @@ config SENSOR_SERVER_PORT
     int "UDP server port"
     range 1 65535
     default 5000
+
+endif
 
 endmenu

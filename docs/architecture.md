@@ -2,92 +2,77 @@
 
 ## System Overview
 
-The system consists of three ESP32-C6 sensor nodes, each connected to an MT6701 magnetic angle sensor. Each node samples raw angle data at a target frequency of 1000 Hz and transmits it to a centralized Rust Sensor Server over Wi-Fi using UDP.
+The system consists of ESP32 sensor nodes, each connected to an MT6701 magnetic angle sensor and targeting 1000 samples per second. ESP-NOW is the default transport. An ESP32-C6 gateway forwards packets over native USB serial to the Rust Sensor Server. Wi-Fi / UDP remains selectable in sensor sdkconfig and server configuration.
 
 ```mermaid
-flowchart TB
-    subgraph Sensors["Sensor Nodes"]
-        direction LR
-        M1["MT6701 #1"] --> E1["ESP32-C6 #1"]
-        M2["MT6701 #2"] --> E2["ESP32-C6 #2"]
-        M3["MT6701 #3"] --> E3["ESP32-C6 #3"]
-    end
-
-    subgraph Network["Wi-Fi Network / UDP"]
-        AP["Wi-Fi Access Point"]
-    end
-
-    subgraph Server["Rust Sensor Server"]
-        UDP["UDP Receiver :5000"]
-        TimeSync["Time Sync Handler"]
-        Decoder["Packet Decoder"]
-        Manager["Device State Manager"]
-        Cache["Latest Sample Cache"]
-        Stats["Packet, Rate & Latency Statistics"]
-
-        UDP --> TimeSync
-        TimeSync -->|"UDP sync response"| AP
-        UDP --> Decoder
-        Decoder --> Manager
-        Manager --> Cache
-        Manager --> Stats
-    end
-
-    E1 -->|"UDP / 1000 Hz"| AP
-    E2 -->|"UDP / 1000 Hz"| AP
-    E3 -->|"UDP / 1000 Hz"| AP
-
-    AP --> UDP
-    AP -->|"UDP sync response"| E1
-    AP -->|"UDP sync response"| E2
-    AP -->|"UDP sync response"| E3
+flowchart LR
+    MT["MT6701 sensors"] --> Nodes["ESP32 sensor nodes"]
+    Nodes -->|"ESP-NOW, channel 1"| Gateway["ESP32-C6 gateway"]
+    Gateway <-->|"USB serial: samples / clock sync"| Server["Rust Sensor Server"]
+    Nodes <-->|"Optional Wi-Fi / UDP"| Server
+    Server --> State["MAC mapping, latest samples, rate/loss/latency"]
 ```
 
-## ESP32-C6 Firmware Architecture
+The firmware, gateway and server build independently and implement their own transport code. The `protocol/` directory contains documentation only, including the wire contract and serial framing. The gateway does not rewrite sensor timestamps or identify nodes with its own MAC.
 
-Each ESP32-C6 runs the same firmware. Its Wi-Fi station MAC is included in each sample packet and identifies the node.
+In the server configuration, `[server] mode = "espnow"` selects gateway serial and `[gateway] serial = "path"` selects the host device. `mode = "udp"` selects direct UDP. In sensor sdkconfig, `CONFIG_SENSOR_ESPNOW=y` is the default and excludes the Wi-Fi AP connection, reconnect task and UDP code; the Wi-Fi radio driver remains required by ESP-NOW.
 
-The firmware is responsible for sensor sampling, packet encoding, Wi-Fi connectivity, and UDP transmission.
+The sections below describe each transport, the shared protocol, and the server's common state and statistics path.
+
+## Sensor Firmware Architecture
+
+Each supported sensor board runs the same firmware. Its station MAC identifies the node in every sample. A compile-time sdkconfig option selects ESP-NOW (the default) or Wi-Fi / UDP.
 
 ```mermaid
 flowchart TD
-    Sensor["MT6701 Sensor"]
-    Driver["Sensor Driver"]
-    Sampler["1 kHz Sampling Task"]
-    Queue["Bounded Sample Queue"]
-    Encoder["38-byte v2 Packet Encoder"]
-    Sender["Nonblocking UDP Sender"]
-    Sync["UDP Clock Sync Client"]
-    WiFi["Wi-Fi STA"]
-
-    Sensor --> Driver
-    Driver --> Sampler
-    Sampler --> Queue
-    Queue --> Encoder
-    Encoder --> Sender
-    Sender --> WiFi
-    Sync <--> WiFi
-    Sync --> Encoder
+    Sensor["MT6701 Sensor"] --> Driver["I2C Sensor Driver"]
+    Driver --> Sampler["1 kHz Sampling Task"]
+    Sampler --> Queue["Bounded Sample Queue"]
+    Queue --> Encoder["Version 2 Packet Encoder"]
+    Encoder --> Select{"Transport selected in sdkconfig"}
+    Select -->|Default: ESP-NOW| Radio["Broadcast radio transport"]
+    Radio <--> Gateway["ESP32-C6 gateway"]
+    Gateway <-->|"Framed USB serial"| Server["Rust Sensor Server"]
+    Select -->|Optional| UDP["Wi-Fi / UDP transport"]
+    UDP <-->|"UDP samples and clock sync"| Server
 ```
 
 ### Responsibilities
 
-- **Sensor Driver:** Reads the raw 14-bit angle value from the MT6701 over I²C.
-- **Sampling Task:** Uses a 1 ms high-resolution timer to target 1000 samples per second.
-- **Sample Queue:** Decouples sensor reads from network transmission; samples are dropped when the bounded queue is full or Wi-Fi is disconnected.
-- **Packet Encoder:** Encodes each sample into the fixed 38-byte version 2 binary format in [`protocol/protocol.md`](../protocol/protocol.md), including the Wi-Fi station MAC and clock-sync metadata.
-- **UDP Sender:** Sends one nonblocking UDP datagram per queued sample.
-- **Clock Sync Client:** Exchanges monotonic timestamps with the server over UDP about once per second and attaches the estimated clock offset and round-trip time to samples.
-- **Wi-Fi Manager:** Establishes and maintains network connectivity, including reconnection.
+- **Sensor driver:** Reads the raw 14-bit angle value from the MT6701 over I2C.
+- **Sampling task:** Uses a 1 ms high-resolution timer to target 1000 samples per second.
+- **Sample queue:** Decouples sensor reads from transport submission. Samples can be dropped when the bounded queue fills or the selected transport is unavailable.
+- **Packet encoder:** Encodes samples and clock-sync requests using the version 2 contract in [`protocol/protocol.md`](../protocol/protocol.md), including the station MAC and clock-sync metadata.
+- **ESP-NOW transport:** Sends broadcasts on the configured channel and queues matching sync responses from the gateway. It needs the Wi-Fi radio driver, but does not start an access point connection, IP stack, or UDP application code.
+- **Optional UDP transport:** Connects to a configured access point, reconnects after disconnects, and sends packets to the configured server address.
+- **Clock-sync client:** Exchanges monotonic timestamps about once per second over the selected transport and attaches the estimated server-clock offset and round-trip time to samples.
+
+## ESP-NOW Gateway Architecture
+
+The gateway runs on an ESP32-C6 and bridges version 2 packets between the sensor radio and the server serial port. It checks that each received sensor payload's MAC matches the radio source, then frames it with COBS and CRC-16/CCITT-FALSE. Responses from the server are decoded and broadcast back to the sensors; each sensor accepts only its own matching time-sync response.
+
+```mermaid
+flowchart LR
+    RadioIn["ESP-NOW receive callback"] --> Queue["Bounded packet queue"]
+    Queue --> Encode["COBS + CRC framing"]
+    Encode --> HostOut["USB Serial/JTAG or UART"]
+    HostOut -->|"time-sync response"| Decode["Frame decoder"]
+    Decode --> RadioOut["ESP-NOW broadcast"]
+```
+
+Radio callbacks only enqueue packets. Dedicated tasks handle each serial direction, keeping serial writes out of the radio receive callback.
 
 ## Rust Sensor Server Architecture
 
-The Rust Sensor Server receives UDP packets from all three ESP32-C6 nodes and maintains their latest sensor states independently.
+The Rust Sensor Server receives packets through either a UDP socket or the ESP-NOW gateway's serial stream. Both inputs use the same version 2 decoder, MAC mapping, device state, clock-sync handling, and statistics.
 
 ```mermaid
 flowchart TD
-    UDP["UDP Socket :5000"]
-    Decoder["Protocol Decoder"]
+    Input{"Configured transport"}
+    UDP["UDP Socket"]
+    Serial["Gateway serial stream"]
+    Frame["COBS / CRC frame decoder"]
+    Decoder["Version 2 protocol decoder"]
     Validate{"Valid Packet?"}
     Router["MAC-to-Logical-Device Mapping"]
     Sync["Clock Sync Response"]
@@ -98,9 +83,14 @@ flowchart TD
 
     Stats["Reception Statistics"]
 
+    Input -->|"UDP"| UDP
+    Input -->|"ESP-NOW"| Serial
     UDP --> Decoder
+    Serial --> Frame --> Decoder
     UDP --> Sync
-    Sync -->|"UDP response to node"| UDP
+    Serial --> Sync
+    Sync -->|"UDP response"| UDP
+    Sync -->|"framed serial response"| Serial
     Decoder --> Validate
 
     Validate -->|Yes| Router
@@ -117,9 +107,9 @@ flowchart TD
 
 ### Responsibilities
 
-- **UDP Receiver:** Listens on UDP port `5000`.
-- **Protocol Decoder:** Parses the fixed-length binary packets.
-- **Clock Sync Handler:** Replies to configured nodes with receive/send timestamps and the current server-session ID.
+- **Transport receiver:** Opens the configured UDP address or serial device. Serial input handles fragmented and concatenated frames and rejects invalid CRC or oversized frames.
+- **Protocol decoder:** Parses the fixed-length binary packets after transport framing is removed.
+- **Clock-sync handler:** Replies to configured nodes with receive/send timestamps and the current server-session ID. In ESP-NOW mode, the response travels back through serial and the gateway radio.
 - **Packet Validator:** Validates packet length, magic number, protocol version, packet type, and status fields.
 - **Device Mapping:** Maps each packet's MAC address to a configured logical sensor name or role.
 - **Device State Manager:** Maintains the latest sample for each sensor node.
@@ -129,17 +119,17 @@ flowchart TD
 
 ### Transport Configuration
 
-| Parameter                | Value                                                 |
-| ------------------------ | ----------------------------------------------------- |
-| Transport                | UDP / IPv4                                            |
-| Network                  | Wi-Fi                                                 |
-| Server Listen Port       | 5000 (default)                                        |
-| Firmware UDP Destination | Configurable per node; must match the server listener |
-| Sampling Rate            | 1000 Hz per node (target)                             |
-| Transmission Mode        | One packet per sample                                 |
-| Packet Size              | 38-byte version 2 sample                              |
-| Byte Order               | Big Endian                                            |
-| Retransmission           | Disabled                                              |
+| Parameter                | Value |
+| ------------------------ | ----- |
+| Default transport        | ESP-NOW through ESP32-C6 gateway and framed serial |
+| Optional transport       | Wi-Fi / UDP over IPv4 |
+| UDP listen port          | 5000 (default, UDP mode) |
+| ESP-NOW channel          | 1 (default; must match the gateway) |
+| Sampling rate            | 1000 Hz per node (target) |
+| Transmission mode        | One packet per sample |
+| Packet size              | 38-byte version 2 sample |
+| Byte order               | Big endian |
+| Retransmission           | Disabled |
 
 ### Packet Format
 
@@ -160,7 +150,7 @@ flowchart TD
 
 **Version 2 sample size: 38 bytes.** The device and server use 32-bit wrapping microsecond counters, with modular comparisons limited to intervals below 2^31 microseconds. The server's monotonic time origin is captured at the start of `main`. The previous 46-byte version 2 format and version 1 packets are not accepted. See [`protocol/protocol.md`](../protocol/protocol.md) for timestamp, sync, and latency formulas.
 
-The `timestamp_us` field is the low 32 bits of the ESP32's local monotonic time at the start of the MT6701 I2C read. A UDP time-sync exchange estimates each node's modular offset from the server's monotonic clock. The server uses the offset and matching session ID to calculate per-device sample-to-receive latency percentiles. The metric does not model or subtract MT6701 internal measurement delay. See [`protocol/protocol.md`](../protocol/protocol.md) for field semantics and status bits.
+The `timestamp_us` field is the low 32 bits of the ESP32's local monotonic time at the start of the MT6701 I2C read. A time-sync exchange over the selected transport estimates each node's modular offset from the server's monotonic clock. The server uses the offset and matching session ID to calculate per-device sample-to-receive latency percentiles. ESP-NOW latency includes gateway and serial buffering. The metric does not model or subtract MT6701 internal measurement delay. See [`protocol/protocol.md`](../protocol/protocol.md) for field semantics and status bits.
 
 ## Device Identification
 
@@ -172,9 +162,10 @@ All nodes use the same firmware and include their Wi-Fi station MAC in each samp
 
 - MT6701 raw angle acquisition.
 - 1000 Hz target sampling rate per node.
-- Wi-Fi connectivity and automatic reconnection.
-- UDP packet transmission.
-- Rust UDP packet reception and validation.
+- ESP-NOW sample and clock-sync transmission through a serial gateway by default.
+- Optional Wi-Fi connectivity, automatic reconnection, and UDP packet transmission.
+- Rust UDP and framed-serial packet reception and validation.
+- Gateway radio-to-serial and serial-to-radio forwarding.
 - Independent state management for three sensor nodes.
 - Packet reception statistics and sequence-based loss detection.
 - Device-to-server clock synchronization and per-device P50/P75/P90/P99 latency estimates.
@@ -196,7 +187,9 @@ In a future development phase, the server will expose sensor data through a Unix
 
 ```mermaid
 flowchart LR
-    ESP["3 x ESP32-C6"] -->|"Wi-Fi / UDP"| Server["Rust Sensor Service"]
+    ESP["ESP32 sensor nodes"] -->|"ESP-NOW (default)"| Gateway["ESP32-C6 gateway"]
+    Gateway <-->|"USB serial"| Server["Rust Sensor Service"]
+    ESP -.->|"Optional Wi-Fi / UDP"| Server
     Server -.->|"Future: UDS"| Controller["Motion Controller"]
     Controller -.-> Planner["Motion Planning"]
     Planner -.-> Motor["Motor Actuation"]

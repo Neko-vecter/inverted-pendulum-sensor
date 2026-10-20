@@ -1,25 +1,46 @@
-﻿# Sensor UDP Protocol, Version 2
+﻿# Sensor Protocol, Version 2
 
-This document defines the single supported UDP format between each ESP32-C6 sensor and the Rust Sensor Server. Version 2 uses 32-bit wrapping microsecond counters for device and server time.
+This document defines the wire format between each ESP32 sensor and the Rust Sensor Server, carried either by ESP-NOW through a serial gateway or directly by Wi-Fi / UDP. Version 2 uses 32-bit wrapping microsecond counters for device and server time.
 
 ## Transport
 
-| Setting                  | Value                                                |
-| ------------------------ | ---------------------------------------------------- |
-| Network                  | Wi-Fi station                                        |
-| Transport                | UDP over IPv4                                        |
-| Destination              | Server IPv4 and UDP port from firmware configuration |
-| Default destination port | 5000                                                 |
-| Sample target            | 1,000 datagrams per second per node                  |
-| Sample packet length     | 38 bytes                                             |
-| Byte order               | Big-endian for multi-byte fields                     |
-| Retransmission           | None                                                 |
+| Setting                  | Value |
+| ------------------------ | ----- |
+| Default transport        | ESP-NOW to gateway, then framed serial to server |
+| Optional transport       | Wi-Fi / UDP over IPv4 |
+| ESP-NOW channel          | 1 by default; sensor and gateway must match |
+| UDP destination          | Configured server IPv4 address and port (UDP mode only) |
+| UDP port                 | 5000 by default (UDP mode only) |
+| Sample target            | 1,000 packets per second per node |
+| Sample packet length     | 38 bytes |
+| Byte order               | Big-endian for multi-byte fields |
+| Retransmission           | None |
 
-The device sends one sample datagram per sampling slot and a time-sync request/response about once per second. UDP is best effort. Queue overflow and Wi-Fi outages can produce sequence gaps; samples are not replayed later.
+The device sends one sample packet per sampling slot and a time-sync request/response about once per second. Both UDP and ESP-NOW are best effort; queue overflow, radio loss, or Wi-Fi outages can produce sequence gaps. Samples are not replayed later.
+
+### ESP-NOW and serial gateway
+
+ESP-NOW is the default firmware transport. Sensors and the gateway use the same fixed 2.4 GHz channel (default 1), without associating with an access point. All packets use unencrypted ESP-NOW broadcast. There is one active gateway/server per channel; broadcast success is not a receiver acknowledgement.
+
+Sensor-to-gateway radio payloads are exactly the 38-byte sample or 18-byte sync request defined below. The gateway checks that the embedded sensor MAC matches the radio source MAC. Server-to-gateway serial payloads are 34-byte sync responses. The gateway broadcasts these responses, and each sensor accepts only replies matching its MAC, pending sequence and request timestamp.
+
+The bidirectional serial envelope is:
+
+```text
+00 | COBS(payload | CRC16_BE) | 00
+```
+
+CRC-16/CCITT-FALSE covers the payload: polynomial `0x1021`, initial `0xFFFF`, no reflection, no final XOR, checksum transmitted high byte first. For the check string `123456789`, CRC is `0x29B1`. Payload `49 00 50` encodes to `00 02 49 04 50 15 55 00` (a framing test vector, not a sensor packet).
+
+Maximum payload length is 38 bytes, encoded length is at most 41 bytes, and the complete envelope is at most 43 bytes. Empty delimiters are ignored. Receivers buffer across reads, process multiple frames in one read, bound their buffer sizes, discard malformed/CRC-invalid/oversized frames and recover at the next zero delimiter. Application logs must use a separate console.
+
+The gateway defaults to native USB Serial/JTAG. Optional UART uses 8N1, no flow control and 921600 baud by default; three nodes at 1 kHz need a faster UART or native USB. Serial framing adds five bytes per packet. Sensor samples and sync requests pass to the same server decoder, MAC mapping, state and statistics used for UDP. Sync responses traverse serial and radio in reverse. Latency measures sample-to-host reception including gateway and serial buffering, and is subject to sync-path asymmetry.
+
+These projects build independently and implement this contract locally. This directory contains documentation only.
 
 ## Common header
 
-Every datagram begins with this four-byte header:
+Every protocol packet begins with this four-byte header:
 
 | Offset | Length | Field       | Encoding                                           |
 | -----: | -----: | ----------- | -------------------------------------------------- |
@@ -38,7 +59,7 @@ The packet is encoded field by field. It is not a native C structure and has no 
 |      0 |      2 | magic              | 0x4950                                               |
 |      2 |      1 | version            | 2                                                    |
 |      3 |      1 | packet_type        | Sample 0x01                                          |
-|      4 |      6 | device_mac         | Raw Wi-Fi station MAC octets, display order          |
+|      4 |      6 | device_mac         | Raw sensor station MAC octets, display order         |
 |     10 |      4 | sequence           | Unsigned 32-bit big-endian sample-slot counter       |
 |     14 |      4 | timestamp_us       | Unsigned 32-bit wrapping device microsecond counter  |
 |     18 |      2 | raw_angle          | Unsigned 16-bit; valid range 0-16,383                |
@@ -52,7 +73,7 @@ Total sample length is **38 bytes**.
 
 ### Device identity and mapping
 
-device_mac is the six-byte Wi-Fi station MAC read from the ESP32-C6. For example, AA:BB:CC:DD:EE:FF is transmitted as AA BB CC DD EE FF. The MAC is inside the payload because an IP receiver cannot use the original Wi-Fi link source MAC after packets pass through an access point.
+device_mac is the six-byte station MAC read from the ESP32 sensor. For example, AA:BB:CC:DD:EE:FF is transmitted as AA BB CC DD EE FF. The embedded MAC identifies the sensor on both transports. It is necessary in UDP mode because an IP receiver cannot use the original Wi-Fi link source MAC after packets pass through an access point; the gateway also checks it against the ESP-NOW source MAC.
 
 The firmware has no per-node numeric ID. The server maps each MAC to a logical sensor name or role in its configuration file. Unknown MAC addresses are counted and are not assigned to a configured device.
 
@@ -88,7 +109,7 @@ The sender emits exactly 0x01 on success and 0x02 on an I2C failure. For status 
 
 ## Time synchronization messages
 
-The device and server exchange four timestamps over the same configured UDP port. Only MAC addresses present in the server's device mapping receive a response.
+The device and server exchange four timestamps over the selected transport. Only MAC addresses present in the server's device mapping receive a response.
 
 ### Request: device to server
 
@@ -136,7 +157,7 @@ mapped_sample_us = (timestamp_us + clock_offset_us) mod 2^32
 latency_us = (server_receive_us - mapped_sample_us) mod 2^32
 ```
 
-server_receive_us is captured when the server's recv_from call returns. The server accepts the latency only when it is less than 2^31 microseconds; a larger value is treated as a clock-ahead or ambiguous result and excluded from percentiles. The metric includes I2C acquisition after the timestamp point, firmware queueing, UDP/Wi-Fi delivery, and server receive scheduling. Clock offset error and path asymmetry limit one-way latency accuracy.
+server_receive_us is captured when the server transport returns the packet, after a UDP receive or serial frame read. The server accepts the latency only when it is less than 2^31 microseconds; a larger value is treated as a clock-ahead or ambiguous result and excluded from percentiles. The metric includes I2C acquisition after the timestamp point, firmware queueing, the selected radio/network path, gateway and serial buffering in ESP-NOW mode, and server receive scheduling. Clock offset error and path asymmetry limit one-way latency accuracy.
 
 The server reports P50, P75, P90, and P99 per configured device and statistics interval, using the nearest-rank percentile definition. It retains at most 50,000 latency samples per device per interval; larger intervals use a bounded reservoir sample, while the log reports both total and retained sample counts.
 

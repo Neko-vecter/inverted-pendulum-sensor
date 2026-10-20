@@ -1,6 +1,6 @@
 # ESP32 MT6701 sensor firmware
 
-This PlatformIO project supports the Seeed Studio XIAO ESP32-C6, XIAO ESP32-C3, and XIAO ESP32-C5. It samples one MT6701 over I2C and sends one UDP sample datagram per 1 ms sampling tick when Wi-Fi is connected. Version 2 packets include clock-sync metadata and a 32-bit wrapping microsecond counter; all boards use the same firmware. The Wi-Fi station MAC carried in each packet identifies the node; the Rust server assigns its logical sensor name from its own configuration.
+This PlatformIO project supports the Seeed Studio XIAO ESP32-C6, XIAO ESP32-C3, and XIAO ESP32-C5. It samples one MT6701 over I2C and sends one version 2 sample per 1 ms sampling tick over ESP-NOW by default, with optional Wi-Fi / UDP. Version 2 packets include clock-sync metadata and a 32-bit wrapping microsecond counter; all boards use the same firmware. The Wi-Fi station MAC carried in each packet identifies the node; the Rust server assigns its logical sensor name from its own configuration.
 
 ## Wiring
 
@@ -15,41 +15,55 @@ The default MT6701 wiring uses D4/D5 on all three boards. The GPIO numbers diffe
 
 Use a 3.3 V-compatible MT6701 breakout. I2C needs pull-up resistors on SDA and SCL; use the breakout's pull-ups or add external pull-ups if it has none. The firmware enables the ESP32 internal pull-ups as a convenience, but they may be too weak for reliable operation at 400 kHz on some wiring.
 
-## Local configuration and build
+## Transport configuration and build
 
-The environments share one ignored local configuration for Wi-Fi credentials and the UDP server. From `firmware`, copy the template once:
+ESP-NOW is the default transport on all three boards. Each project builds on its own; the sensor firmware has no source dependency on the gateway or server.
 
-```shell
+From this directory, optionally create local defaults:
+
+```sh
 cp sdkconfig.example.local sdkconfig.local
 ```
 
-Edit the `CONFIG_SENSOR_*` entries in `sdkconfig.local` to set Wi-Fi credentials and the UDP server IPv4 address/port. I2C pins and clock are fixed by each PlatformIO environment's compile flags: C6 uses GPIO22/23, C3 uses GPIO6/7, and C5 uses GPIO23/24, all at 400 kHz. CMake selects the C5 board's 8 MB flash setting when building for `esp32c5`; it does not need to be in the local sdkconfig file. `sdkconfig.local` is ignored by Git. A WPA2 passphrase must be 8-63 bytes, or a 64-digit hexadecimal pre-shared key; an empty password selects an open network.
+```ini
+CONFIG_SENSOR_ESPNOW=y
+CONFIG_SENSOR_ESPNOW_CHANNEL=1
+```
 
-The Seeed C5 board definition selects `default_8MB.csv`; this project includes that partition table in the `firmware` directory. It provides two OTA app slots, SPIFFS storage, and a coredump partition.
+The channel must match the gateway (default 1). Samples and clock-sync requests use unencrypted ESP-NOW broadcast, with one active gateway/server per channel. No SSID or access point is needed. The Wi-Fi radio driver remains enabled, while AP connection, reconnection, IPv4 configuration and UDP application code are excluded from the build.
 
-The local file is an `SDKCONFIG_DEFAULTS` fragment, not the generated full ESP-IDF configuration. All PlatformIO environments use it; PlatformIO writes each board's generated ESP-IDF configuration under `.pio/build/<environment>/`. CMake watches `sdkconfig.local`, so changing it triggers ESP-IDF reconfiguration and an incremental rebuild of the objects and components affected by the changed settings. A clean build is not needed:
+To select Wi-Fi / UDP instead:
 
-```shell
+```ini
+CONFIG_SENSOR_ESPNOW=n
+CONFIG_SENSOR_WIFI_SSID="your-ssid"
+CONFIG_SENSOR_WIFI_PASSWORD="your-password"
+CONFIG_SENSOR_SERVER_IPV4="192.168.1.100"
+CONFIG_SENSOR_SERVER_PORT=5000
+```
+
+These options are under **Pendulum sensor** in `pio run -t menuconfig`. Wi-Fi settings are hidden while ESP-NOW is enabled. An empty SSID in UDP mode keeps sampling active without networking. WPA2 passwords must be 8-63 bytes or a 64-digit hexadecimal PSK; an empty password selects an open network.
+
+`SDKCONFIG_DEFAULTS` initializes unset values; existing generated `sdkconfig.<environment>` settings take precedence. For an existing build, change the generated configuration through menuconfig, or regenerate it from your updated local defaults before rebuilding. `pio run -t clean` alone does not reset generated sdkconfig values. Keep credentials in ignored local files.
+
+```sh
 pio run -e seeed_xiao_esp32c6
 pio run -e seeed_xiao_esp32c6 -t upload
 pio device monitor -e seeed_xiao_esp32c6
 ```
 
-Use `seeed_xiao_esp32c3` for the C3, or `seeed_xiao_esp32c5` for the C5. `pio run -t menuconfig` edits the generated full configuration; keep local overrides in the corresponding ignored file. With an empty SSID, the node still samples and logs but does not start Wi-Fi or send UDP packets.
+Use `seeed_xiao_esp32c3` or `seeed_xiao_esp32c5` for the other boards. I2C pins and clock remain in each environment's build flags. C5 builds select 8 MB flash and use the included `default_8MB.csv` partition table.
 
-If Wi-Fi associates with the AP but repeatedly disconnects with reason `15`, ESP-IDF reports a four-way handshake timeout. Check that the local WPA2 passphrase is correct. Editing a local config file does not update an existing generated configuration or an already-flashed image; clean, rebuild, and upload after changing Wi-Fi credentials. The disconnect log includes a short reason description and never prints the passphrase.
-
-In ESP-IDF Wi-Fi logs, `authmode:0x3` means WPA2-PSK. The cipher value `0x3` means TKIP, which is deprecated; configure the AP for WPA2-Personal with AES/CCMP where possible.
-
-At startup, the firmware prints the compiled UDP destination. It sends a four-timestamp clock-sync request about once per second and includes the estimated modular server clock offset and sync round-trip time in each version 2 sample. The periodic `send errors` count is for sample `sendto` failures; `sync send errors` counts time-sync request failures. Neither confirms remote delivery. Use server sequence gaps to observe samples not received by the server.
-
-The serial log prints the station MAC. Add that MAC to the Rust server's device mapping configuration to assign the node a logical role. The firmware does not contain a per-node numeric ID and does not receive configuration from the server. If the station MAC cannot be read, Wi-Fi/UDP are disabled so the node cannot send samples with an invalid all-zero device identity; sensor sampling can still run.
+The firmware logs its station MAC. Map this MAC to a logical name in the server configuration. With ESP-NOW, flash the gateway separately and configure the server with `server.mode = "espnow"` and `[gateway] serial = "path"`.
 
 ## Implementation notes
 
-- The ESP high-resolution timer notifies a dedicated sampling task every 1,000 us. The task reads MT6701 registers `0x03` then `0x04` over I2C.
-- A bounded queue separates acquisition from the nonblocking UDP sender. If Wi-Fi is down, the queue is cleared and acquisition continues. Sequence numbers therefore expose outages and local transmit drops to the receiver.
-- The sample timestamp is taken immediately before the MT6701 I2C read. Latency starts at this timestamp; firmware does not model or subtract MT6701 internal measurement delay. Clock offset is refreshed through the server's UDP time-sync exchange.
-- The sampler reports an estimated rate and counts for I2C errors, missed timer slots, full-queue drops, and samples taken while Wi-Fi is unavailable every five seconds.
-- Sampling is a 1 kHz target. Wi-Fi scheduling, I2C errors, and queue pressure can reduce the delivered rate; UDP does not retransmit lost packets.
-- The wire format is documented in [`protocol/protocol.md`](../protocol/protocol.md).
+- The high-resolution timer notifies the sampling task every 1,000 us. Acquisition reads MT6701 registers `0x03` and `0x04` over I2C.
+- A bounded queue separates acquisition from transmission. Sequence gaps expose missed timer slots, queue overflow and radio/network losses.
+- ESP-NOW sends are serialized through the send callback. Receive callbacks only copy sync replies to a bounded queue; they never block.
+- The version 2 wire format is unchanged: 38-byte samples, 18-byte sync requests and 34-byte sync responses. Both transports use the same clock-sync and latency calculations. ESP-NOW sync replies travel through the gateway serial port.
+- Sampling targets 1 kHz. Delivered rates depend on radio contention, I2C and serial throughput; broadcast submission does not acknowledge remote reception and samples are not retransmitted.
+- Five-second logs report sampling, queue drops, offline reads, transport submission failures and clock sync. ESP-NOW considers the radio ready after initialization even if no gateway is present.
+- The timestamp precedes the MT6701 I2C read; latency does not subtract the sensor's internal measurement delay.
+
+Protocol details are documented in `protocol/protocol.md` in the system documentation.
