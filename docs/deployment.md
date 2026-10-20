@@ -46,6 +46,12 @@ cp sdkconfig.example.local sdkconfig.local
 pio run -e seeed_xiao_esp32c6
 ```
 
+#### xiao esp32c3
+
+```sh
+pio run -e seeed_xiao_esp32c3
+```
+
 #### xiao esp32c5
 
 ```sh
