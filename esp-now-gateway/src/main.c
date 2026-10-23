@@ -75,10 +75,12 @@ static void receive_packet(const esp_now_recv_info_t *info, const uint8_t *data,
 {
     if (info == NULL || info->src_addr == NULL || data == NULL ||
         (length != SENSOR_PROTOCOL_PACKET_SIZE &&
-         length != SENSOR_PROTOCOL_SYNC_REQUEST_SIZE) ||
+         length != SENSOR_PROTOCOL_SYNC_REQUEST_SIZE &&
+         length != SENSOR_PROTOCOL_SYNC_REPORT_SIZE) ||
         data[0] != 0x49 || data[1] != 0x50 || data[2] != SENSOR_PROTOCOL_VERSION ||
         !((data[3] == SENSOR_PROTOCOL_TYPE_SAMPLE && length == SENSOR_PROTOCOL_PACKET_SIZE) ||
-          (data[3] == SENSOR_PROTOCOL_TYPE_TIME_SYNC_REQUEST && length == SENSOR_PROTOCOL_SYNC_REQUEST_SIZE)) ||
+          (data[3] == SENSOR_PROTOCOL_TYPE_TIME_SYNC_REQUEST && length == SENSOR_PROTOCOL_SYNC_REQUEST_SIZE) ||
+          (data[3] == SENSOR_PROTOCOL_TYPE_TIME_SYNC_REPORT && length == SENSOR_PROTOCOL_SYNC_REPORT_SIZE)) ||
         memcmp(info->src_addr, data + 4, 6) != 0) {
         return;
     }

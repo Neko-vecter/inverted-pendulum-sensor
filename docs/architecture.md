@@ -28,7 +28,7 @@ flowchart TD
     Sensor["MT6701 Sensor"] --> Driver["I2C Sensor Driver"]
     Driver --> Sampler["1 kHz Sampling Task"]
     Sampler --> Queue["Bounded Sample Queue"]
-    Queue --> Encoder["Version 2 Packet Encoder"]
+    Queue --> Encoder["Version 3 Packet Encoder"]
     Encoder --> Select{"Transport selected in sdkconfig"}
     Select -->|Default: ESP-NOW| Radio["Broadcast radio transport"]
     Radio <--> Gateway["ESP32-C6 gateway"]
@@ -42,14 +42,14 @@ flowchart TD
 - **Sensor driver:** Reads the raw 14-bit angle value from the MT6701 over I2C.
 - **Sampling task:** Uses a 1 ms high-resolution timer to target 1000 samples per second.
 - **Sample queue:** Decouples sensor reads from transport submission. Samples can be dropped when the bounded queue fills or the selected transport is unavailable.
-- **Packet encoder:** Encodes samples and clock-sync requests using the version 2 contract in [`protocol/protocol.md`](../protocol/protocol.md), including the station MAC and clock-sync metadata.
+- **Packet encoder:** Encodes samples and clock-sync messages using the version 3 contract in [`protocol/protocol.md`](../protocol/protocol.md). Samples carry a compact session token; clock metadata is sent only in low-rate sync exchanges.
 - **ESP-NOW transport:** Sends broadcasts on the configured channel and queues matching sync responses from the gateway. It needs the Wi-Fi radio driver, but does not start an access point connection, IP stack, or UDP application code.
 - **Optional UDP transport:** Connects to a configured access point, reconnects after disconnects, and sends packets to the configured server address.
-- **Clock-sync client:** Exchanges monotonic timestamps about once per second over the selected transport and attaches the estimated server-clock offset and round-trip time to samples.
+- **Clock-sync client:** Exchanges monotonic timestamps about once per second and reports the response receive timestamp to the server. The server retains the clock offset and round-trip time per device.
 
 ## ESP-NOW Gateway Architecture
 
-The gateway runs on an ESP32-C6 and bridges version 2 packets between the sensor radio and the server serial port. It checks that each received sensor payload's MAC matches the radio source, then frames it with COBS and CRC-16/CCITT-FALSE. Responses from the server are decoded and broadcast back to the sensors; each sensor accepts only its own matching time-sync response.
+The gateway runs on an ESP32-C6 and bridges version 3 packets between the sensor radio and the server serial port. It checks that each received sensor payload's MAC matches the radio source, then frames it with COBS and CRC-16/CCITT-FALSE. Time-sync responses from the server are decoded and broadcast back to the sensors; each sensor accepts only its own matching response.
 
 ```mermaid
 flowchart LR
@@ -64,7 +64,7 @@ Radio callbacks only enqueue packets. Dedicated tasks handle each serial directi
 
 ## Rust Sensor Server Architecture
 
-The Rust Sensor Server receives packets through either a UDP socket or the ESP-NOW gateway's serial stream. Both inputs use the same version 2 decoder, MAC mapping, device state, clock-sync handling, and statistics.
+The Rust Sensor Server receives packets through either a UDP socket or the ESP-NOW gateway's serial stream. Both inputs use the same version 3 decoder, MAC mapping, device state, clock-sync handling, and statistics.
 
 ```mermaid
 flowchart TD
@@ -72,7 +72,7 @@ flowchart TD
     UDP["UDP Socket"]
     Serial["Gateway serial stream"]
     Frame["COBS / CRC frame decoder"]
-    Decoder["Version 2 protocol decoder"]
+    Decoder["Version 3 protocol decoder"]
     Validate{"Valid Packet?"}
     Router["MAC-to-Logical-Device Mapping"]
     Sync["Clock Sync Response"]
@@ -127,7 +127,7 @@ flowchart TD
 | ESP-NOW channel          | 1 (default; must match the gateway) |
 | Sampling rate            | 1000 Hz per node (target) |
 | Transmission mode        | One packet per sample |
-| Packet size              | 38-byte version 2 sample |
+| Packet size              | 24-byte version 3 sample |
 | Byte order               | Big endian |
 | Retransmission           | Disabled |
 
@@ -141,16 +141,14 @@ flowchart TD
 | 4      | `device_mac`         | byte[6] | 6 bytes |
 | 10     | `sequence`           | uint32  | 4 bytes |
 | 14     | `timestamp_us`       | uint32  | 4 bytes |
-| 18     | `raw_angle`          | uint16  | 2 bytes |
-| 20     | `status`             | uint8   | 1 byte  |
-| 21     | `reserved`           | uint8   | 1 byte  |
-| 22     | `sync_session_id`    | uint64  | 8 bytes |
-| 30     | `clock_offset_us`    | uint32  | 4 bytes |
-| 34     | `sync_round_trip_us` | uint32  | 4 bytes |
+| 18     | `angle_status`       | uint16  | 2 bytes |
+| 20     | `sync_token`         | uint32  | 4 bytes |
 
-**Version 2 sample size: 38 bytes.** The device and server use 32-bit wrapping microsecond counters, with modular comparisons limited to intervals below 2^31 microseconds. The server's monotonic time origin is captured at the start of `main`. The previous 46-byte version 2 format and version 1 packets are not accepted. See [`protocol/protocol.md`](../protocol/protocol.md) for timestamp, sync, and latency formulas.
+**Version 3 sample size: 24 bytes.** The device and server use 32-bit wrapping microsecond counters, with modular comparisons limited to intervals below 2^31 microseconds. The server's monotonic time origin is captured at the start of `main`. Only version 3 packets are accepted. See [`protocol/protocol.md`](../protocol/protocol.md) for timestamp, sync, and latency formulas.
 
-The `timestamp_us` field is the low 32 bits of the ESP32's local monotonic time at the start of the MT6701 I2C read. A time-sync exchange over the selected transport estimates each node's modular offset from the server's monotonic clock. The server uses the offset and matching session ID to calculate per-device sample-to-receive latency percentiles. ESP-NOW latency includes gateway and serial buffering. The metric does not model or subtract MT6701 internal measurement delay. See [`protocol/protocol.md`](../protocol/protocol.md) for field semantics and status bits.
+In `angle_status`, the upper two bits encode state (`00` valid, `01` I2C error) and the lower 14 bits carry the raw MT6701 angle. I2C errors require the angle bits to be zero; states `10` and `11` are reserved.
+
+The `timestamp_us` field is the low 32 bits of the ESP32's local monotonic time at the start of the MT6701 I2C read. A four-timestamp exchange over the selected transport lets the server calculate each node's modular clock offset. The server uses that offset and the matching session token to calculate sample-to-receive latency percentiles. ESP-NOW latency includes gateway and serial buffering. The metric does not model or subtract MT6701 internal measurement delay. See [`protocol/protocol.md`](../protocol/protocol.md) for field semantics and status bits.
 
 ## Device Identification
 

@@ -1,5 +1,5 @@
 // Independent host implementation of the serial framing documented in protocol.md.
-const PAYLOAD_MAX: usize = 38;
+const PAYLOAD_MAX: usize = 30;
 const ENCODED_MAX: usize = PAYLOAD_MAX + 3;
 
 fn crc16(data: &[u8]) -> u16 {
@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn fragmented_and_concatenated_frames() {
-        for length in [18, 34, 38] {
+        for length in [18, 24, 26, 30] {
             for fill in [0, 1, 255] {
                 let packet = vec![fill; length];
                 let frame = encode(&packet);
@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn corrupt_truncated_and_oversized_input_recovers() {
-        let valid = encode(&[0x49, 0x50, 2, 1]);
+        let valid = encode(&[0x49, 0x50, 3, 1]);
         let mut corrupt = valid.clone();
         corrupt[2] ^= 1;
         let stream: Vec<_> = b"boot log\n"
@@ -150,7 +150,7 @@ mod tests {
             .collect();
         let mut decoder = Decoder::default();
         let packets: Vec<_> = stream.into_iter().filter_map(|b| decoder.push(b)).collect();
-        assert_eq!(packets, vec![vec![0x49, 0x50, 2, 1]; 2]);
+        assert_eq!(packets, vec![vec![0x49, 0x50, 3, 1]; 2]);
         assert_eq!(decoder.rejected, 4);
     }
 }

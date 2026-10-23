@@ -1,18 +1,18 @@
 use std::fmt;
 use std::str::FromStr;
 
-pub const SAMPLE_PACKET_SIZE: usize = 38;
+pub const SAMPLE_PACKET_SIZE: usize = 24;
 pub const TIME_SYNC_REQUEST_SIZE: usize = 18;
-pub const TIME_SYNC_RESPONSE_SIZE: usize = 34;
+pub const TIME_SYNC_RESPONSE_SIZE: usize = 30;
+pub const TIME_SYNC_REPORT_SIZE: usize = 26;
 const MAGIC: u16 = 0x4950;
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 const TYPE_SAMPLE: u8 = 0x01;
 const TYPE_TIME_SYNC_REQUEST: u8 = 0x02;
 const TYPE_TIME_SYNC_RESPONSE: u8 = 0x03;
+const TYPE_TIME_SYNC_REPORT: u8 = 0x04;
 const STATUS_ANGLE_VALID: u8 = 0x01;
 const STATUS_I2C_ERROR: u8 = 0x02;
-const STATUS_KNOWN_BITS: u8 = STATUS_ANGLE_VALID | STATUS_I2C_ERROR;
-const INVALID_ANGLE: u16 = 0xFFFF;
 const MAX_ANGLE: u16 = 0x3FFF;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -69,14 +69,7 @@ pub struct SensorSample {
     pub timestamp_us: u32,
     pub raw_angle: u16,
     pub status: u8,
-    pub clock_sync: Option<ClockSyncMetadata>,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct ClockSyncMetadata {
-    pub session_id: u64,
-    pub offset_us: u32,
-    pub round_trip_us: u32,
+    pub sync_token: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -87,9 +80,19 @@ pub struct TimeSyncRequest {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub struct TimeSyncReport {
+    pub device_mac: MacAddress,
+    pub sequence: u32,
+    pub device_t1_us: u32,
+    pub device_t4_us: u32,
+    pub sync_token: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub enum DecodedDatagram {
     Sample(SensorSample),
     TimeSyncRequest(TimeSyncRequest),
+    TimeSyncReport(TimeSyncReport),
 }
 
 impl SensorSample {
@@ -115,6 +118,7 @@ pub enum DecodeError {
     PacketType,
     Status,
     Angle,
+    SyncToken,
 }
 
 impl DecodeError {
@@ -126,6 +130,7 @@ impl DecodeError {
             Self::PacketType => "packet type",
             Self::Status => "status",
             Self::Angle => "angle",
+            Self::SyncToken => "sync token",
         }
     }
 }
@@ -146,6 +151,9 @@ pub fn decode_datagram(packet: &[u8]) -> Result<DecodedDatagram, DecodeError> {
         TYPE_TIME_SYNC_REQUEST => {
             decode_time_sync_request(packet).map(DecodedDatagram::TimeSyncRequest)
         }
+        TYPE_TIME_SYNC_REPORT => {
+            decode_time_sync_report(packet).map(DecodedDatagram::TimeSyncReport)
+        }
         _ => Err(DecodeError::PacketType),
     }
 }
@@ -155,30 +163,16 @@ fn decode_sample(packet: &[u8]) -> Result<SensorSample, DecodeError> {
         return Err(DecodeError::Length);
     }
 
-    let session_id = u64::from_be_bytes(packet[22..30].try_into().unwrap());
-    let clock_sync = (session_id != 0).then_some(ClockSyncMetadata {
-        session_id,
-        offset_us: u32::from_be_bytes(packet[30..34].try_into().unwrap()),
-        round_trip_us: u32::from_be_bytes(packet[34..38].try_into().unwrap()),
-    });
-    let raw_angle = u16::from_be_bytes(packet[18..20].try_into().unwrap());
-    let status = packet[20];
-
-    if status & !STATUS_KNOWN_BITS != 0 {
-        return Err(DecodeError::Status);
-    }
-    let angle_is_valid = status & STATUS_ANGLE_VALID != 0;
-    let i2c_error = status & STATUS_I2C_ERROR != 0;
-    if angle_is_valid {
-        if i2c_error {
-            return Err(DecodeError::Status);
-        }
-        if raw_angle > MAX_ANGLE {
-            return Err(DecodeError::Angle);
-        }
-    } else if !i2c_error || raw_angle != INVALID_ANGLE {
-        return Err(DecodeError::Status);
-    }
+    let angle_state = u16::from_be_bytes(packet[18..20].try_into().unwrap());
+    let angle_status = angle_state >> 14;
+    let raw_angle = angle_state & MAX_ANGLE;
+    let (status, raw_angle) = match angle_status {
+        0 => (STATUS_ANGLE_VALID, raw_angle),
+        1 if raw_angle == 0 => (STATUS_I2C_ERROR, 0),
+        1 => return Err(DecodeError::Angle),
+        _ => return Err(DecodeError::Status),
+    };
+    let sync_token = u32::from_be_bytes(packet[20..24].try_into().unwrap());
 
     Ok(SensorSample {
         device_mac: read_mac(&packet[4..10]),
@@ -186,7 +180,24 @@ fn decode_sample(packet: &[u8]) -> Result<SensorSample, DecodeError> {
         timestamp_us: u32::from_be_bytes(packet[14..18].try_into().unwrap()),
         raw_angle,
         status,
-        clock_sync,
+        sync_token,
+    })
+}
+
+fn decode_time_sync_report(packet: &[u8]) -> Result<TimeSyncReport, DecodeError> {
+    if packet.len() != TIME_SYNC_REPORT_SIZE {
+        return Err(DecodeError::Length);
+    }
+    let sync_token = u32::from_be_bytes(packet[22..26].try_into().unwrap());
+    if sync_token == 0 {
+        return Err(DecodeError::SyncToken);
+    }
+    Ok(TimeSyncReport {
+        device_mac: read_mac(&packet[4..10]),
+        sequence: u32::from_be_bytes(packet[10..14].try_into().unwrap()),
+        device_t1_us: u32::from_be_bytes(packet[14..18].try_into().unwrap()),
+        device_t4_us: u32::from_be_bytes(packet[18..22].try_into().unwrap()),
+        sync_token,
     })
 }
 
@@ -205,7 +216,7 @@ pub fn encode_time_sync_response(
     request: TimeSyncRequest,
     server_t2_us: u32,
     server_t3_us: u32,
-    session_id: u64,
+    sync_token: u32,
 ) -> [u8; TIME_SYNC_RESPONSE_SIZE] {
     let mut packet = [0_u8; TIME_SYNC_RESPONSE_SIZE];
     write_header(&mut packet, TYPE_TIME_SYNC_RESPONSE);
@@ -214,7 +225,7 @@ pub fn encode_time_sync_response(
     packet[14..18].copy_from_slice(&request.device_t1_us.to_be_bytes());
     packet[18..22].copy_from_slice(&server_t2_us.to_be_bytes());
     packet[22..26].copy_from_slice(&server_t3_us.to_be_bytes());
-    packet[26..34].copy_from_slice(&session_id.to_be_bytes());
+    packet[26..30].copy_from_slice(&sync_token.to_be_bytes());
     packet
 }
 

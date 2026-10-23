@@ -1,9 +1,20 @@
-use crate::protocol::{DecodeError, MacAddress, SensorSample};
+use crate::protocol::{DecodeError, MacAddress, SensorSample, TimeSyncReport, TimeSyncRequest};
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 const MAX_REPORTED_UNKNOWN_MACS: usize = 32;
 const MAX_LATENCY_PERCENTILE_SAMPLES: usize = 50_000;
+const COUNTER_HALF_RANGE_US: u32 = 0x8000_0000;
+const CLOCK_SYNC_MAX_RTT_US: u32 = 1_000_000;
+
+#[derive(Clone, Copy, Debug)]
+struct PendingSync {
+    sequence: u32,
+    device_t1_us: u32,
+    server_t2_us: u32,
+    server_t3_us: u32,
+    sync_token: u32,
+}
 
 #[derive(Debug)]
 pub struct DeviceState {
@@ -24,6 +35,9 @@ pub struct DeviceState {
     pub latency_unsynced: u64,
     pub latency_clock_ahead: u64,
     pub latest_sync_rtt_us: Option<u32>,
+    sync_token: u32,
+    clock_offset_us: Option<u32>,
+    pending_sync: Option<PendingSync>,
     last_sequence: Option<u32>,
     last_timestamp_us: Option<u32>,
 }
@@ -35,7 +49,7 @@ pub struct LatestSample {
 }
 
 impl DeviceState {
-    fn new(logical_name: String, mac: MacAddress) -> Self {
+    fn new(logical_name: String, mac: MacAddress, sync_token: u32) -> Self {
         Self {
             logical_name,
             mac,
@@ -54,24 +68,21 @@ impl DeviceState {
             latency_unsynced: 0,
             latency_clock_ahead: 0,
             latest_sync_rtt_us: None,
+            sync_token,
+            clock_offset_us: None,
+            pending_sync: None,
             last_sequence: None,
             last_timestamp_us: None,
         }
     }
 
-    fn record(
-        &mut self,
-        sample: SensorSample,
-        received_at: Instant,
-        server_now_us: u32,
-        server_session_id: u64,
-    ) {
+    fn record(&mut self, sample: SensorSample, received_at: Instant, server_now_us: u32) {
         self.received_total += 1;
         self.interval_received += 1;
         if sample.has_i2c_error() {
             self.sensor_errors += 1;
         }
-        self.record_latency(sample, server_now_us, server_session_id);
+        self.record_latency(sample, server_now_us);
 
         let mut advances_sequence = false;
         let mut is_restart = false;
@@ -117,12 +128,9 @@ impl DeviceState {
                     sample,
                     received_at,
                 });
-            } else if self
-                .latest
-                .is_some_and(|latest| {
-                    timestamp_is_not_older(sample.timestamp_us, latest.sample.timestamp_us)
-                })
-            {
+            } else if self.latest.is_some_and(|latest| {
+                timestamp_is_not_older(sample.timestamp_us, latest.sample.timestamp_us)
+            }) {
                 self.latest = Some(LatestSample {
                     sample,
                     received_at,
@@ -131,23 +139,16 @@ impl DeviceState {
         }
     }
 
-    fn record_latency(
-        &mut self,
-        sample: SensorSample,
-        server_now_us: u32,
-        server_session_id: u64,
-    ) {
-        let Some(sync) = sample.clock_sync else {
-            self.latency_unsynced += 1;
-            return;
-        };
-        if sync.session_id != server_session_id {
+    fn record_latency(&mut self, sample: SensorSample, server_now_us: u32) {
+        if sample.sync_token == 0 || sample.sync_token != self.sync_token {
             self.latency_unsynced += 1;
             return;
         }
-
-        self.latest_sync_rtt_us = Some(sync.round_trip_us);
-        let sample_server_us = sample.timestamp_us.wrapping_add(sync.offset_us);
+        let Some(offset_us) = self.clock_offset_us else {
+            self.latency_unsynced += 1;
+            return;
+        };
+        let sample_server_us = sample.timestamp_us.wrapping_add(offset_us);
         let latency_us = server_now_us.wrapping_sub(sample_server_us);
         let latency_us = (latency_us < 0x8000_0000).then_some(u64::from(latency_us));
         if let Some(latency_us) = latency_us {
@@ -183,6 +184,58 @@ impl DeviceState {
         (self.sequence_slots > 0)
             .then(|| self.estimated_lost as f64 * 100.0 / self.sequence_slots as f64)
     }
+
+    fn begin_sync(&mut self, request: TimeSyncRequest, server_t2_us: u32, server_t3_us: u32) {
+        self.pending_sync = Some(PendingSync {
+            sequence: request.sequence,
+            device_t1_us: request.device_t1_us,
+            server_t2_us,
+            server_t3_us,
+            sync_token: self.sync_token,
+        });
+    }
+
+    fn complete_sync(&mut self, report: TimeSyncReport) -> bool {
+        let Some(pending) = self.pending_sync.take() else {
+            return false;
+        };
+        if report.sync_token != self.sync_token
+            || pending.sync_token != report.sync_token
+            || report.sequence != pending.sequence
+            || report.device_t1_us != pending.device_t1_us
+        {
+            return false;
+        }
+
+        let device_elapsed_us = report.device_t4_us.wrapping_sub(report.device_t1_us);
+        let server_elapsed_us = pending.server_t3_us.wrapping_sub(pending.server_t2_us);
+        if device_elapsed_us >= COUNTER_HALF_RANGE_US
+            || server_elapsed_us >= COUNTER_HALF_RANGE_US
+            || device_elapsed_us < server_elapsed_us
+        {
+            return false;
+        }
+        let round_trip_us = device_elapsed_us - server_elapsed_us;
+        if round_trip_us > CLOCK_SYNC_MAX_RTT_US {
+            return false;
+        }
+
+        let offset_a = signed_counter_difference(pending.server_t2_us, report.device_t1_us);
+        let offset_b = signed_counter_difference(pending.server_t3_us, report.device_t4_us);
+        let measured_offset_us = ((i64::from(offset_a) + i64::from(offset_b)) / 2) as u32;
+        if let Some(offset_us) = self.clock_offset_us.as_mut() {
+            let error_us = signed_counter_difference(measured_offset_us, *offset_us);
+            *offset_us = offset_us.wrapping_add((error_us / 4) as u32);
+        } else {
+            self.clock_offset_us = Some(measured_offset_us);
+        }
+        self.latest_sync_rtt_us = Some(round_trip_us);
+        true
+    }
+}
+
+fn signed_counter_difference(lhs: u32, rhs: u32) -> i32 {
+    lhs.wrapping_sub(rhs) as i32
 }
 
 fn timestamp_is_behind(sample_timestamp: u32, previous_timestamp: u32) -> bool {
@@ -200,10 +253,15 @@ pub struct DeviceRegistry {
 }
 
 impl DeviceRegistry {
-    pub fn new(devices_by_mac: HashMap<MacAddress, String>) -> Self {
+    pub fn new(devices_by_mac: HashMap<MacAddress, String>, sync_token: u32) -> Self {
         let by_name = devices_by_mac
             .iter()
-            .map(|(mac, name)| (name.clone(), DeviceState::new(name.clone(), *mac)))
+            .map(|(mac, name)| {
+                (
+                    name.clone(),
+                    DeviceState::new(name.clone(), *mac, sync_token),
+                )
+            })
             .collect();
         Self {
             by_mac: devices_by_mac,
@@ -216,13 +274,12 @@ impl DeviceRegistry {
         sample: SensorSample,
         received_at: Instant,
         server_now_us: u32,
-        server_session_id: u64,
     ) -> bool {
         let Some(name) = self.by_mac.get(&sample.device_mac) else {
             return false;
         };
         if let Some(state) = self.by_name.get_mut(name) {
-            state.record(sample, received_at, server_now_us, server_session_id);
+            state.record(sample, received_at, server_now_us);
             true
         } else {
             false
@@ -231,6 +288,32 @@ impl DeviceRegistry {
 
     pub fn contains_mac(&self, mac: MacAddress) -> bool {
         self.by_mac.contains_key(&mac)
+    }
+
+    pub fn begin_sync(
+        &mut self,
+        request: TimeSyncRequest,
+        server_t2_us: u32,
+        server_t3_us: u32,
+    ) -> bool {
+        let Some(name) = self.by_mac.get(&request.device_mac) else {
+            return false;
+        };
+        if let Some(state) = self.by_name.get_mut(name) {
+            state.begin_sync(request, server_t2_us, server_t3_us);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn complete_sync(&mut self, report: TimeSyncReport) -> bool {
+        let Some(name) = self.by_mac.get(&report.device_mac) else {
+            return false;
+        };
+        self.by_name
+            .get_mut(name)
+            .is_some_and(|state| state.complete_sync(report))
     }
 }
 

@@ -29,8 +29,6 @@
 #define SENDER_TASK_PRIORITY 7U
 
 
-#define INVALID_ANGLE 0xFFFFU
-
 static const char *TAG = "pendulum_sensor";
 
 static QueueHandle_t s_sample_queue;
@@ -48,8 +46,7 @@ typedef struct {
     uint32_t next_sequence;
     uint32_t pending_sequence;
     uint32_t pending_t1_us;
-    uint64_t server_session_id;
-    uint32_t offset_us;
+    uint32_t sync_token;
     uint32_t round_trip_us;
     uint32_t last_response_us;
     uint32_t next_request_us;
@@ -67,19 +64,7 @@ static bool counter_deadline_reached(uint32_t now_us, uint32_t deadline_us)
     return (uint32_t)(now_us - deadline_us) < COUNTER_HALF_RANGE_US;
 }
 
-static int32_t signed_counter_difference(uint32_t lhs, uint32_t rhs)
-{
-    const int64_t difference = (int64_t)lhs - (int64_t)rhs;
-    if (difference > INT32_MAX) {
-        return (int32_t)(difference - 4294967296LL);
-    }
-    if (difference < INT32_MIN) {
-        return (int32_t)(difference + 4294967296LL);
-    }
-    return (int32_t)difference;
-}
-
-static uint32_t process_time_sync_responses(void)
+static uint32_t process_time_sync_responses(uint32_t *sync_errors_in_interval)
 {
     uint32_t updates = 0;
     for (;;) {
@@ -99,7 +84,7 @@ static uint32_t process_time_sync_responses(void)
             !s_clock_sync.request_pending ||
             response.sequence != s_clock_sync.pending_sequence ||
             response.device_t1_us != s_clock_sync.pending_t1_us ||
-            response.server_session_id == 0U) {
+            response.sync_token == 0U) {
             continue;
         }
 
@@ -117,22 +102,17 @@ static uint32_t process_time_sync_responses(void)
             continue;
         }
 
-        const int32_t outbound_offset_us = signed_counter_difference(
-            response.server_t2_us, response.device_t1_us);
-        const int32_t inbound_offset_us = signed_counter_difference(
-            response.server_t3_us, device_t4_us);
-        const uint32_t measured_offset_us = (uint32_t)(
-            ((int64_t)outbound_offset_us + (int64_t)inbound_offset_us) / 2);
-
-        if (!s_clock_sync.valid ||
-            s_clock_sync.server_session_id != response.server_session_id) {
-            s_clock_sync.offset_us = measured_offset_us;
-        } else {
-            const int32_t offset_error_us = signed_counter_difference(
-                measured_offset_us, s_clock_sync.offset_us);
-            s_clock_sync.offset_us += (uint32_t)(offset_error_us / 4);
+        uint8_t report[SENSOR_PROTOCOL_SYNC_REPORT_SIZE];
+        const size_t report_length = sensor_protocol_encode_time_sync_report(
+            s_station_mac, response.sequence, response.device_t1_us, device_t4_us,
+            response.sync_token, report);
+        if (report_length == 0U || !sensor_transport_send(report, report_length)) {
+            ++(*sync_errors_in_interval);
+            s_clock_sync.request_pending = false;
+            continue;
         }
-        s_clock_sync.server_session_id = response.server_session_id;
+
+        s_clock_sync.sync_token = response.sync_token;
         s_clock_sync.round_trip_us = (uint32_t)round_trip_us;
         s_clock_sync.last_response_us = device_t4_us;
         s_clock_sync.valid = true;
@@ -186,7 +166,7 @@ static void sender_task(void *argument)
             continue;
         }
 
-        sync_updates_in_interval += process_time_sync_responses();
+        sync_updates_in_interval += process_time_sync_responses(&sync_errors_in_interval);
         uint32_t now_us = monotonic_counter_us();
         if (s_clock_sync.valid &&
             (uint32_t)(now_us - s_clock_sync.last_response_us) >
@@ -209,13 +189,7 @@ static void sender_task(void *argument)
                 CLOCK_SYNC_STALE_AFTER_US) {
             s_clock_sync.valid = false;
         }
-        sample.sync_session_id = s_clock_sync.valid
-                                     ? s_clock_sync.server_session_id
-                                     : 0U;
-        sample.clock_offset_us = s_clock_sync.valid ? s_clock_sync.offset_us : 0;
-        sample.sync_round_trip_us = s_clock_sync.valid
-                                        ? s_clock_sync.round_trip_us
-                                        : 0U;
+        sample.sync_token = s_clock_sync.valid ? s_clock_sync.sync_token : 0U;
         uint8_t packet[SENSOR_PROTOCOL_PACKET_SIZE];
         const size_t packet_length = sensor_protocol_encode_sample(&sample, packet);
         if (sensor_transport_send(packet, packet_length)) {
@@ -230,11 +204,11 @@ static void sender_task(void *argument)
                      "Transport packets submitted=%" PRIu32 ", send errors=%" PRIu32
                      ", clock sync updates=%" PRIu32
                      ", sync send errors=%" PRIu32 ", synced=%s"
-                     ", offset_mod=%" PRIu32 " us, sync RTT=%" PRIu32 " us",
+                     ", sync token=%" PRIu32 ", sync RTT=%" PRIu32 " us",
                      sent_in_interval, errors_in_interval,
                      sync_updates_in_interval, sync_errors_in_interval,
                      s_clock_sync.valid ? "yes" : "no",
-                     s_clock_sync.offset_us, s_clock_sync.round_trip_us);
+                     s_clock_sync.sync_token, s_clock_sync.round_trip_us);
             sent_in_interval = 0;
             errors_in_interval = 0;
             sync_errors_in_interval = 0;
@@ -277,7 +251,7 @@ static void sampling_task(void *argument)
             sample.raw_angle = raw_angle;
             sample.status = SENSOR_STATUS_ANGLE_VALID;
         } else {
-            sample.raw_angle = INVALID_ANGLE;
+            sample.raw_angle = 0U;
             sample.status = SENSOR_STATUS_I2C_ERROR;
             ++i2c_errors_in_interval;
         }

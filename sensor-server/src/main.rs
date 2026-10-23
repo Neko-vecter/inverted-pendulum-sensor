@@ -67,22 +67,22 @@ fn print_usage() {
 
 fn run(config_path: &std::path::Path, server_start: Instant) -> Result<(), String> {
     let config = config::load(config_path)?;
-    let server_session_id = SystemTime::now()
+    let session_entropy = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("system clock is before the Unix epoch: {error}"))?
         .as_micros()
         .min(u128::from(u64::MAX)) as u64;
-    let server_session_id = server_session_id.max(1);
+    let server_sync_token = ((session_entropy as u32) ^ ((session_entropy >> 32) as u32)).max(1);
     let mut transport = Transport::open(&config.transport)?;
     println!(
-        "protocol v2, {} configured device(s)",
+        "protocol v3, {} configured device(s)",
         config.devices_by_mac.len()
     );
-    println!("time-sync session: {server_session_id}");
+    println!("time-sync token: {server_sync_token}");
     println!("stats interval: {}s", config.stats_interval.as_secs());
     println!("press Ctrl+C to stop");
 
-    let mut devices = DeviceRegistry::new(config.devices_by_mac);
+    let mut devices = DeviceRegistry::new(config.devices_by_mac, server_sync_token);
     let mut metrics = ServerMetrics::default();
     let mut interval_started = Instant::now();
 
@@ -97,7 +97,7 @@ fn run(config_path: &std::path::Path, server_start: Instant) -> Result<(), Strin
                     received_at,
                     server_now_us,
                     server_start,
-                    server_session_id,
+                    server_sync_token,
                     &mut transport,
                     &mut devices,
                     &mut metrics,
@@ -143,7 +143,7 @@ fn handle_datagram(
     received_at: Instant,
     server_now_us: u32,
     server_start: Instant,
-    server_session_id: u64,
+    server_sync_token: u32,
     transport: &mut Transport,
     devices: &mut DeviceRegistry,
     metrics: &mut ServerMetrics,
@@ -159,7 +159,7 @@ fn handle_datagram(
     match datagram {
         DecodedDatagram::Sample(sample) => {
             metrics.record_decoded();
-            if devices.record(sample, received_at, server_now_us, server_session_id) {
+            if devices.record(sample, received_at, server_now_us) {
                 metrics.record_mapped();
             } else {
                 metrics.record_unknown(sample.device_mac);
@@ -170,11 +170,15 @@ fn handle_datagram(
                 return;
             }
             let server_t3_us = monotonic_us(server_start, Instant::now()) as u32;
+            devices.begin_sync(request, server_now_us, server_t3_us);
             let response =
-                encode_time_sync_response(request, server_now_us, server_t3_us, server_session_id);
+                encode_time_sync_response(request, server_now_us, server_t3_us, server_sync_token);
             if let Err(error) = transport.respond(&response, sender) {
                 eprintln!("time-sync response failed: {error}");
             }
+        }
+        DecodedDatagram::TimeSyncReport(report) => {
+            let _ = devices.complete_sync(report);
         }
     }
 }
@@ -322,20 +326,21 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
         let mut transport = Transport::Udp(socket);
-        let mut devices = DeviceRegistry::new(HashMap::from([(mac, "sensor_1".to_owned())]));
+        let mut devices = DeviceRegistry::new(HashMap::from([(mac, "sensor_1".to_owned())]), 7);
         let mut metrics = ServerMetrics::default();
         let start = Instant::now();
-        let mut request = vec![0x49, 0x50, 2, 2];
+        let mut request = vec![0x49, 0x50, 3, 2];
         request.extend(mac.octets());
         request.extend(42_u32.to_be_bytes());
         request.extend(1000_u32.to_be_bytes());
         client.send_to(&request, address).unwrap();
         let received = transport.receive().unwrap().unwrap();
+        let server_t2 = monotonic_us(start, received.received_at) as u32;
         handle_datagram(
             &received.data,
             received.sender,
             received.received_at,
-            1100,
+            server_t2,
             start,
             7,
             &mut transport,
@@ -349,19 +354,39 @@ mod tests {
             &response[..18],
             &[&request[..3], &[3], &request[4..]].concat()
         );
-        assert_eq!(&response[18..22], &1100_u32.to_be_bytes());
-        assert_eq!(&response[26..34], &7_u64.to_be_bytes());
+        let response_t2 = u32::from_be_bytes(response[18..22].try_into().unwrap());
+        let response_t3 = u32::from_be_bytes(response[22..26].try_into().unwrap());
+        assert_eq!(response_t2, server_t2);
+        assert_eq!(&response[26..30], &7_u32.to_be_bytes());
+
+        let device_t4 = 1000_u32
+            .wrapping_add(response_t3.wrapping_sub(response_t2))
+            .wrapping_add(200);
+        let mut report = vec![0x49, 0x50, 3, 4];
+        report.extend(mac.octets());
+        report.extend(42_u32.to_be_bytes());
+        report.extend(1000_u32.to_be_bytes());
+        report.extend(device_t4.to_be_bytes());
+        report.extend(7_u32.to_be_bytes());
+        handle_datagram(
+            &report,
+            Some(client.local_addr().unwrap()),
+            Instant::now(),
+            server_t2.wrapping_add(100),
+            start,
+            7,
+            &mut transport,
+            &mut devices,
+            &mut metrics,
+        );
 
         // A gateway-framed sample reaches the same state/latency path as UDP.
-        let mut sample = vec![0x49, 0x50, 2, 1];
+        let mut sample = vec![0x49, 0x50, 3, 1];
         sample.extend(mac.octets());
         sample.extend(1_u32.to_be_bytes());
         sample.extend(1000_u32.to_be_bytes());
         sample.extend(4096_u16.to_be_bytes());
-        sample.extend([1, 0]);
-        sample.extend(7_u64.to_be_bytes());
-        sample.extend(100_u32.to_be_bytes());
-        sample.extend(200_u32.to_be_bytes());
+        sample.extend(7_u32.to_be_bytes());
         let mut decoder = serial_frame::Decoder::default();
         let packet = serial_frame::encode(&sample)
             .into_iter()
@@ -371,7 +396,7 @@ mod tests {
             &packet,
             None,
             Instant::now(),
-            1300,
+            server_t2.wrapping_add(100),
             start,
             7,
             &mut transport,

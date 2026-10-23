@@ -33,6 +33,6 @@ int main(void)
     uint8_t invalid[] = {255, 1};
     assert(serial_frame_decode(invalid, sizeof(invalid), decoded) == 0);
     assert(serial_frame_decode(invalid, 0, decoded) == 0);
-    puts("serial framing: wire vector, CRC, bounds and 9728 round trips passed");
+    puts("serial framing: wire vector, CRC, bounds and 7680 round trips passed");
     return 0;
 }

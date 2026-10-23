@@ -27,15 +27,6 @@ static uint32_t read_u32_be(const uint8_t *source)
            (uint32_t)source[3];
 }
 
-static uint64_t read_u64_be(const uint8_t *source)
-{
-    uint64_t value = 0;
-    for (size_t index = 0; index < 8; ++index) {
-        value = (value << 8) | source[index];
-    }
-    return value;
-}
-
 static void write_header(uint8_t *packet, uint8_t packet_type)
 {
     write_u16_be(&packet[0], SENSOR_PROTOCOL_MAGIC);
@@ -56,15 +47,11 @@ size_t sensor_protocol_encode_sample(const sensor_sample_t *sample,
     }
     write_u32_be(&packet[10], sample->sequence);
     write_u32_be(&packet[14], sample->timestamp_us);
-    write_u16_be(&packet[18], sample->raw_angle);
-    packet[20] = sample->status;
-    packet[21] = 0;
-    for (size_t index = 0; index < 8U; ++index) {
-        packet[22U + index] = (uint8_t)(sample->sync_session_id >>
-                                        (56U - (8U * index)));
-    }
-    write_u32_be(&packet[30], sample->clock_offset_us);
-    write_u32_be(&packet[34], sample->sync_round_trip_us);
+    const uint16_t angle_status = sample->status == SENSOR_STATUS_I2C_ERROR
+                                      ? 0x4000U
+                                      : (uint16_t)(sample->raw_angle & 0x3FFFU);
+    write_u16_be(&packet[18], angle_status);
+    write_u32_be(&packet[20], sample->sync_token);
 
     return SENSOR_PROTOCOL_PACKET_SIZE;
 }
@@ -108,6 +95,28 @@ int sensor_protocol_decode_time_sync_response(
     response->device_t1_us = read_u32_be(&packet[14]);
     response->server_t2_us = read_u32_be(&packet[18]);
     response->server_t3_us = read_u32_be(&packet[22]);
-    response->server_session_id = read_u64_be(&packet[26]);
+    response->sync_token = read_u32_be(&packet[26]);
     return 1;
+}
+
+size_t sensor_protocol_encode_time_sync_report(
+    const uint8_t mac[6],
+    uint32_t sequence,
+    uint32_t device_t1_us,
+    uint32_t device_t4_us,
+    uint32_t sync_token,
+    uint8_t packet[SENSOR_PROTOCOL_SYNC_REPORT_SIZE])
+{
+    if (mac == NULL || packet == NULL || sync_token == 0U) {
+        return 0;
+    }
+    write_header(packet, SENSOR_PROTOCOL_TYPE_TIME_SYNC_REPORT);
+    for (size_t index = 0; index < 6U; ++index) {
+        packet[4U + index] = mac[index];
+    }
+    write_u32_be(&packet[10], sequence);
+    write_u32_be(&packet[14], device_t1_us);
+    write_u32_be(&packet[18], device_t4_us);
+    write_u32_be(&packet[22], sync_token);
+    return SENSOR_PROTOCOL_SYNC_REPORT_SIZE;
 }

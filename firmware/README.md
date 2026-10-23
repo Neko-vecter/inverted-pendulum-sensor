@@ -1,6 +1,6 @@
 # ESP32 MT6701 sensor firmware
 
-This PlatformIO project supports the Seeed Studio XIAO ESP32-C6, XIAO ESP32-C3, and XIAO ESP32-C5. It samples one MT6701 over I2C and sends one version 2 sample per 1 ms sampling tick over ESP-NOW by default, with optional Wi-Fi / UDP. Version 2 packets include clock-sync metadata and a 32-bit wrapping microsecond counter; all boards use the same firmware. The Wi-Fi station MAC carried in each packet identifies the node; the Rust server assigns its logical sensor name from its own configuration.
+This PlatformIO project supports the Seeed Studio XIAO ESP32-C6, XIAO ESP32-C3, and XIAO ESP32-C5. It samples one MT6701 over I2C and sends one version 3 sample per 1 ms sampling tick over ESP-NOW by default, with optional Wi-Fi / UDP. V3 samples use a 32-bit wrapping microsecond counter and a compact sync token; all boards use the same firmware. The Wi-Fi station MAC carried in each packet identifies the node; the Rust server assigns its logical sensor name from its own configuration.
 
 ## Wiring
 
@@ -60,8 +60,8 @@ The firmware logs its station MAC. Map this MAC to a logical name in the server 
 
 - The high-resolution timer notifies the sampling task every 1,000 us. Acquisition reads MT6701 registers `0x03` and `0x04` over I2C.
 - A bounded queue separates acquisition from transmission. Sequence gaps expose missed timer slots, queue overflow and radio/network losses.
-- ESP-NOW sends are serialized through the send callback. Receive callbacks only copy sync replies to a bounded queue; they never block.
-- The version 2 wire format is unchanged: 38-byte samples, 18-byte sync requests and 34-byte sync responses. Both transports use the same clock-sync and latency calculations. ESP-NOW sync replies travel through the gateway serial port.
+- ESP-NOW sends are submitted immediately without waiting for the previous send callback; driver submission failures are counted. Receive callbacks only copy sync replies to a bounded queue; they never block.
+- Version 3 uses 24-byte samples, 18-byte sync requests, 30-byte sync responses and 26-byte sync completion reports. The sensor returns `t4` in the completion report; the server computes and stores the offset and RTT. ESP-NOW sync replies travel through the gateway serial port.
 - Sampling targets 1 kHz. Delivered rates depend on radio contention, I2C and serial throughput; broadcast submission does not acknowledge remote reception and samples are not retransmitted.
 - Five-second logs report sampling, queue drops, offline reads, transport submission failures and clock sync. ESP-NOW considers the radio ready after initialization even if no gateway is present.
 - The timestamp precedes the MT6701 I2C read; latency does not subtract the sensor's internal measurement delay.

@@ -1,6 +1,6 @@
 # Rust sensor server
 
-This server receives the 38-byte ESP32 version 2 sample format over ESP-NOW gateway serial or UDP, maps each packet's station MAC address to a logical sensor name, replies to version 2 time-sync requests over the selected transport, and reports each sensor's latest reading and reception statistics. The earlier version 1 packets are not supported. The wire format is defined in [`../protocol/protocol.md`](../protocol/protocol.md).
+This server receives the 24-byte ESP32 version 3 sample format over ESP-NOW gateway serial or UDP, maps each packet's station MAC address to a logical sensor name, handles V3 time-sync requests and completion reports, and reports each sensor's latest reading and reception statistics. Only version 3 packets are supported. The wire format is defined in [`../protocol/protocol.md`](../protocol/protocol.md).
 
 ## Configure
 
@@ -50,7 +50,7 @@ For UDP mode, allow incoming traffic on the configured port and configure each n
 
 - Received rate and total well-formed packets per mapped sensor.
 - Latest angle, firmware sequence, local timestamp, and packet age.
-- P50, P75, P90, and P99 sample-to-server receive latency for synchronized version 2 samples, plus sync round-trip time and counts of unsynced or clock-ahead samples.
+- P50, P75, P90, and P99 sample-to-server receive latency for synchronized version 3 samples, plus sync round-trip time and counts of unsynced or clock-ahead samples.
 - Sequence gaps, estimated lost samples, duplicates, out-of-order packets, and timestamp-detected restarts.
 - Sensor I2C errors, malformed packets, unknown MAC addresses, receive errors, and serial framing errors.
 
@@ -64,7 +64,7 @@ cargo build
 
 ## Serial protocol
 
-The gateway and server independently implement the serial contract documented in `../protocol/protocol.md`: zero-delimited COBS frames, CRC-16/CCITT-FALSE, and the unchanged version 2 payload. The stream decoder accepts fragmented and concatenated frames, rejects CRC failures and oversized input, and resumes at the next delimiter. Time-sync responses use the same framing in the reverse direction. Framing rejection totals are printed separately from packet validation errors.
+The gateway and server independently implement the serial contract documented in `../protocol/protocol.md`: zero-delimited COBS frames and CRC-16/CCITT-FALSE around version 3 packets. The stream decoder accepts fragmented and concatenated frames, rejects CRC failures and oversized input, and resumes at the next delimiter. Time-sync responses use the same framing in the reverse direction. Framing rejection totals are printed separately from packet validation errors.
 
 ```sh
 cargo test
