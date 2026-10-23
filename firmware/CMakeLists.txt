@@ -1,11 +1,6 @@
 cmake_minimum_required(VERSION 3.16.0)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
-# Reconfigure when the shared PlatformIO sdkconfig defaults fragment changes.
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.local"
-)
-
 # The XIAO ESP32-C5 module has 8 MB flash. Add this as an SDK config default
 # for C5 builds so the setting is selected by the IDF target, not a local file.
 if("${IDF_TARGET}" STREQUAL "esp32c5" OR "$ENV{IDF_TARGET}" STREQUAL "esp32c5")

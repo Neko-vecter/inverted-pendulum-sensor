@@ -2,7 +2,7 @@
 #include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
-#include "sdkconfig.h"
+#include "config.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
@@ -141,8 +141,8 @@ esp_err_t sensor_transport_start(void)
     if (s_wifi_events == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    const size_t ssid_length = strlen(CONFIG_SENSOR_WIFI_SSID);
-    const size_t password_length = strlen(CONFIG_SENSOR_WIFI_PASSWORD);
+    const size_t ssid_length = strlen(SENSOR_WIFI_SSID);
+    const size_t password_length = strlen(SENSOR_WIFI_PASSWORD);
     if (ssid_length == 0) {
         ESP_LOGW(TAG, "Wi-Fi SSID is empty; sampling will run without UDP");
         return ESP_ERR_INVALID_STATE;
@@ -152,22 +152,22 @@ esp_err_t sensor_transport_start(void)
         ESP_LOGE(TAG, "Wi-Fi SSID/password exceeds the ESP-IDF field size");
         return ESP_ERR_INVALID_ARG;
     }
-    if (!wifi_password_is_valid(CONFIG_SENSOR_WIFI_PASSWORD, password_length)) {
+    if (!wifi_password_is_valid(SENSOR_WIFI_PASSWORD, password_length)) {
         ESP_LOGE(TAG,
                  "WPA2 password must be 8-63 bytes or a 64-character hexadecimal PSK");
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (inet_pton(AF_INET, CONFIG_SENSOR_SERVER_IPV4,
+    if (inet_pton(AF_INET, SENSOR_SERVER_IPV4,
                   &s_server_address.sin_addr) != 1) {
-        ESP_LOGE(TAG, "Invalid server IPv4 address: %s", CONFIG_SENSOR_SERVER_IPV4);
+        ESP_LOGE(TAG, "Invalid server IPv4 address: %s", SENSOR_SERVER_IPV4);
         return ESP_ERR_INVALID_ARG;
     }
     s_server_address.sin_family = AF_INET;
-    s_server_address.sin_port = htons(CONFIG_SENSOR_SERVER_PORT);
+    s_server_address.sin_port = htons(SENSOR_SERVER_PORT);
     ESP_LOGI(TAG, "UDP destination=%s:%u",
-             CONFIG_SENSOR_SERVER_IPV4,
-             (unsigned)CONFIG_SENSOR_SERVER_PORT);
+             SENSOR_SERVER_IPV4,
+             (unsigned)SENSOR_SERVER_PORT);
 
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
@@ -188,8 +188,8 @@ esp_err_t sensor_transport_start(void)
                                                NULL));
 
     wifi_config_t wifi_config = {0};
-    memcpy(wifi_config.sta.ssid, CONFIG_SENSOR_WIFI_SSID, ssid_length);
-    memcpy(wifi_config.sta.password, CONFIG_SENSOR_WIFI_PASSWORD, password_length);
+    memcpy(wifi_config.sta.ssid, SENSOR_WIFI_SSID, ssid_length);
+    memcpy(wifi_config.sta.password, SENSOR_WIFI_PASSWORD, password_length);
     wifi_config.sta.threshold.authmode = password_length == 0
                                              ? WIFI_AUTH_OPEN
                                              : WIFI_AUTH_WPA2_PSK;

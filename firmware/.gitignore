@@ -1,4 +1,5 @@
 .pio
+src/config.h
 sdkconfig.local
 sdkconfig.c5.local
 /sdkconfig.seeed_xiao_esp32c6

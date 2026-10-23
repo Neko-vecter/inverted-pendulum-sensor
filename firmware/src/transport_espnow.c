@@ -1,5 +1,5 @@
 #include <string.h>
-#include "sdkconfig.h"
+#include "config.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "espnow_radio.h"
@@ -35,8 +35,8 @@ esp_err_t sensor_transport_start(void)
     if (s_responses == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI("sensor_espnow", "ESP-NOW broadcast channel=%d", CONFIG_SENSOR_ESPNOW_CHANNEL);
-    return espnow_radio_start(CONFIG_SENSOR_ESPNOW_CHANNEL, receive_packet);
+    ESP_LOGI("sensor_espnow", "ESP-NOW broadcast channel=%d", SENSOR_ESPNOW_CHANNEL);
+    return espnow_radio_start(SENSOR_ESPNOW_CHANNEL, receive_packet);
 }
 
 bool sensor_transport_ready(void)

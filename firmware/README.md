@@ -19,32 +19,33 @@ Use a 3.3 V-compatible MT6701 breakout. I2C needs pull-up resistors on SDA and S
 
 ESP-NOW is the default transport on all three boards. Each project builds on its own; the sensor firmware has no source dependency on the gateway or server.
 
-From this directory, optionally create local defaults:
+Before the first build, copy the example file:
 
 ```sh
-cp sdkconfig.example.local sdkconfig.local
+cp src/config.example.h src/config.h
 ```
 
-```ini
-CONFIG_SENSOR_ESPNOW=y
-CONFIG_SENSOR_ESPNOW_CHANNEL=1
+The local `config.h` is ignored by Git, so it can hold machine-specific
+settings. Edit it to select the transport and set its options:
+
+```c
+#define SENSOR_USE_ESPNOW 1
+#define SENSOR_ESPNOW_CHANNEL 1
 ```
 
 The channel must match the gateway (default 1). Samples and clock-sync requests use unencrypted ESP-NOW broadcast, with one active gateway/server per channel. No SSID or access point is needed. The Wi-Fi radio driver remains enabled, while AP connection, reconnection, IPv4 configuration and UDP application code are excluded from the build.
 
 To select Wi-Fi / UDP instead:
 
-```ini
-CONFIG_SENSOR_ESPNOW=n
-CONFIG_SENSOR_WIFI_SSID="your-ssid"
-CONFIG_SENSOR_WIFI_PASSWORD="your-password"
-CONFIG_SENSOR_SERVER_IPV4="192.168.1.100"
-CONFIG_SENSOR_SERVER_PORT=5000
-```
+For Wi-Fi / UDP, set `SENSOR_USE_ESPNOW` to `0` and edit `SENSOR_WIFI_SSID`,
+`SENSOR_WIFI_PASSWORD`, `SENSOR_SERVER_IPV4`, and `SENSOR_SERVER_PORT` in the
+same header. CMake watches `src/config.h` and selects the matching transport
+sources when it changes; no `menuconfig` or sdkconfig regeneration is needed.
 
-These options are under **Pendulum sensor** in `pio run -t menuconfig`. Wi-Fi settings are hidden while ESP-NOW is enabled. An empty SSID in UDP mode keeps sampling active without networking. WPA2 passwords must be 8-63 bytes or a 64-digit hexadecimal PSK; an empty password selects an open network.
-
-`SDKCONFIG_DEFAULTS` initializes unset values; existing generated `sdkconfig.<environment>` settings take precedence. For an existing build, change the generated configuration through menuconfig, or regenerate it from your updated local defaults before rebuilding. `pio run -t clean` alone does not reset generated sdkconfig values. Keep credentials in ignored local files.
+An empty SSID in UDP mode keeps sampling active without networking. WPA2
+passwords must be 8-63 bytes or a 64-digit hexadecimal PSK; an empty password
+selects an open network. Keep private Wi-Fi credentials in the ignored local
+`config.h` file.
 
 ```sh
 pio run -e seeed_xiao_esp32c6

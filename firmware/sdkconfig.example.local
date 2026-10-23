@@ -1,9 +1,0 @@
-# Local-only overrides for options defined in src/Kconfig.projbuild.
-# Copy this file to sdkconfig.local, then edit the values for this machine.
-CONFIG_SENSOR_ESPNOW=y
-CONFIG_SENSOR_ESPNOW_CHANNEL=1
-# To use Wi-Fi / UDP, set CONFIG_SENSOR_ESPNOW=n, then configure these:
-CONFIG_SENSOR_WIFI_SSID=""
-CONFIG_SENSOR_WIFI_PASSWORD=""
-CONFIG_SENSOR_SERVER_IPV4="192.168.1.100"
-CONFIG_SENSOR_SERVER_PORT=5000
