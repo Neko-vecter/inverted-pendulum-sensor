@@ -1,5 +1,5 @@
 // Independent host implementation of the serial framing documented in protocol.md.
-const PAYLOAD_MAX: usize = 30;
+const PAYLOAD_MAX: usize = 26;
 const ENCODED_MAX: usize = PAYLOAD_MAX + 3;
 
 fn crc16(data: &[u8]) -> u16 {
@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn fragmented_and_concatenated_frames() {
-        for length in [18, 24, 26, 30] {
+        for length in [14, 16, 20, 22, 26] {
             for fill in [0, 1, 255] {
                 let packet = vec![fill; length];
                 let frame = encode(&packet);

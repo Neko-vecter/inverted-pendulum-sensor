@@ -4,7 +4,9 @@ mod serial_frame;
 mod state;
 mod transport;
 
-use crate::protocol::{DecodedDatagram, decode_datagram, encode_time_sync_response};
+use crate::protocol::{
+    DecodedDatagram, decode_datagram, encode_registration_response, encode_time_sync_response,
+};
 use crate::state::{
     DeviceRegistry, DeviceState, ServerMetrics, format_rate, latency_percentiles_us,
 };
@@ -162,11 +164,20 @@ fn handle_datagram(
             if devices.record(sample, received_at, server_now_us) {
                 metrics.record_mapped();
             } else {
-                metrics.record_unknown(sample.device_mac);
+                metrics.record_unknown(sample.device_id);
+            }
+        }
+        DecodedDatagram::RegistrationRequest(request) => {
+            let Some(device_id) = devices.id_for_mac(request.device_mac) else {
+                return;
+            };
+            let response = encode_registration_response(request, device_id);
+            if let Err(error) = transport.respond(&response, sender) {
+                eprintln!("registration response failed: {error}");
             }
         }
         DecodedDatagram::TimeSyncRequest(request) => {
-            if !devices.contains_mac(request.device_mac) {
+            if !devices.contains_id(request.device_id) {
                 return;
             }
             let server_t3_us = monotonic_us(server_start, Instant::now()) as u32;
@@ -219,12 +230,12 @@ fn print_stats(
             .join(", ");
         println!("  rejected: {details}");
     }
-    for (mac, count) in interval.unknown_by_mac {
-        println!("  unmapped MAC {mac}: {count} datagram(s)");
+    for (id, count) in interval.unknown_by_id {
+        println!("  unassigned device ID 0x{id:04X}: {count} datagram(s)");
     }
     if interval.unknown_unlisted > 0 {
         println!(
-            "  additional unmapped datagrams from unlisted MACs: {}",
+            "  additional datagrams from unlisted device IDs: {}",
             interval.unknown_unlisted
         );
     }
@@ -329,8 +340,29 @@ mod tests {
         let mut devices = DeviceRegistry::new(HashMap::from([(mac, "sensor_1".to_owned())]), 7);
         let mut metrics = ServerMetrics::default();
         let start = Instant::now();
+        let mut registration = vec![0x49, 0x50, 3, 5];
+        registration.extend(mac.octets());
+        registration.extend(7_u32.to_be_bytes());
+        client.send_to(&registration, address).unwrap();
+        let received = transport.receive().unwrap().unwrap();
+        handle_datagram(
+            &received.data,
+            received.sender,
+            received.received_at,
+            0,
+            start,
+            7,
+            &mut transport,
+            &mut devices,
+            &mut metrics,
+        );
+        let mut assigned = [0; 64];
+        let assigned_size = client.recv(&mut assigned).unwrap();
+        assert_eq!(assigned_size, protocol::REGISTRATION_RESPONSE_SIZE);
+        assert_eq!(&assigned[14..16], &0_u16.to_be_bytes());
+        let id = 0_u16;
         let mut request = vec![0x49, 0x50, 3, 2];
-        request.extend(mac.octets());
+        request.extend(id.to_be_bytes());
         request.extend(42_u32.to_be_bytes());
         request.extend(1000_u32.to_be_bytes());
         client.send_to(&request, address).unwrap();
@@ -351,19 +383,19 @@ mod tests {
         let size = client.recv(&mut response).unwrap();
         assert_eq!(size, protocol::TIME_SYNC_RESPONSE_SIZE);
         assert_eq!(
-            &response[..18],
+            &response[..14],
             &[&request[..3], &[3], &request[4..]].concat()
         );
-        let response_t2 = u32::from_be_bytes(response[18..22].try_into().unwrap());
-        let response_t3 = u32::from_be_bytes(response[22..26].try_into().unwrap());
+        let response_t2 = u32::from_be_bytes(response[14..18].try_into().unwrap());
+        let response_t3 = u32::from_be_bytes(response[18..22].try_into().unwrap());
         assert_eq!(response_t2, server_t2);
-        assert_eq!(&response[26..30], &7_u32.to_be_bytes());
+        assert_eq!(&response[22..26], &7_u32.to_be_bytes());
 
         let device_t4 = 1000_u32
             .wrapping_add(response_t3.wrapping_sub(response_t2))
             .wrapping_add(200);
         let mut report = vec![0x49, 0x50, 3, 4];
-        report.extend(mac.octets());
+        report.extend(id.to_be_bytes());
         report.extend(42_u32.to_be_bytes());
         report.extend(1000_u32.to_be_bytes());
         report.extend(device_t4.to_be_bytes());
@@ -382,7 +414,7 @@ mod tests {
 
         // A gateway-framed sample reaches the same state/latency path as UDP.
         let mut sample = vec![0x49, 0x50, 3, 1];
-        sample.extend(mac.octets());
+        sample.extend(id.to_be_bytes());
         sample.extend(1_u32.to_be_bytes());
         sample.extend(1000_u32.to_be_bytes());
         sample.extend(4096_u16.to_be_bytes());

@@ -102,6 +102,9 @@ fn validate(raw: RawConfig) -> Result<ServerConfig, String> {
     if raw.devices.is_empty() {
         return Err("at least one [devices] MAC-to-name mapping is required".to_owned());
     }
+    if raw.devices.len() > 256 {
+        return Err("at most 256 devices can be assigned IDs 0x0000 through 0x00FF".to_owned());
+    }
 
     let mut devices_by_mac = HashMap::with_capacity(raw.devices.len());
     let mut logical_names = BTreeSet::new();

@@ -10,7 +10,7 @@ flowchart LR
     Nodes -->|"ESP-NOW, channel 1"| Gateway["ESP32-C6 gateway"]
     Gateway <-->|"USB serial: samples / clock sync"| Server["Rust Sensor Server"]
     Nodes <-->|"Optional Wi-Fi / UDP"| Server
-    Server --> State["MAC mapping, latest samples, rate/loss/latency"]
+    Server --> State["ID mapping, latest samples, rate/loss/latency"]
 ```
 
 The firmware, gateway and server build independently and implement their own transport code. The `protocol/` directory contains documentation only, including the wire contract and serial framing. The gateway does not rewrite sensor timestamps or identify nodes with its own MAC.
@@ -21,7 +21,7 @@ The sections below describe each transport, the shared protocol, and the server'
 
 ## Sensor Firmware Architecture
 
-Each supported sensor board runs the same firmware. Its station MAC identifies the node in every sample. A compile-time sdkconfig option selects ESP-NOW (the default) or Wi-Fi / UDP.
+Each supported sensor board runs the same firmware. Its station MAC is used for startup registration; the server-assigned ID identifies it in later packets. A compile-time sdkconfig option selects ESP-NOW (the default) or Wi-Fi / UDP.
 
 ```mermaid
 flowchart TD
@@ -64,7 +64,7 @@ Radio callbacks only enqueue packets. Dedicated tasks handle each serial directi
 
 ## Rust Sensor Server Architecture
 
-The Rust Sensor Server receives packets through either a UDP socket or the ESP-NOW gateway's serial stream. Both inputs use the same version 3 decoder, MAC mapping, device state, clock-sync handling, and statistics.
+The Rust Sensor Server receives packets through either a UDP socket or the ESP-NOW gateway's serial stream. Both inputs use the same V3 decoder, registration mapping, device state, clock-sync handling, and statistics.
 
 ```mermaid
 flowchart TD
@@ -111,7 +111,7 @@ flowchart TD
 - **Protocol decoder:** Parses the fixed-length binary packets after transport framing is removed.
 - **Clock-sync handler:** Replies to configured nodes with receive/send timestamps and the current server-session ID. In ESP-NOW mode, the response travels back through serial and the gateway radio.
 - **Packet Validator:** Validates packet length, magic number, protocol version, packet type, and status fields.
-- **Device Mapping:** Maps each packet's MAC address to a configured logical sensor name or role.
+- **Device Mapping:** Assigns stable device IDs to registered MAC addresses and maps each ID to a configured logical sensor name or role.
 - **Device State Manager:** Maintains the latest sample for each sensor node.
 - **Statistics:** Tracks packet reception rate, sequence gaps, and packet loss.
 
@@ -127,32 +127,19 @@ flowchart TD
 | ESP-NOW channel          | 1 (default; must match the gateway) |
 | Sampling rate            | 1000 Hz per node (target) |
 | Transmission mode        | One packet per sample |
-| Packet size              | 24-byte version 3 sample |
+| Packet size              | 20-byte version 3 sample |
 | Byte order               | Big endian |
 | Retransmission           | Disabled |
 
 ### Packet Format
 
-| Offset | Field                | Type    | Size    |
-| ------ | -------------------- | ------- | ------- |
-| 0      | `magic`              | uint16  | 2 bytes |
-| 2      | `version`            | uint8   | 1 byte  |
-| 3      | `packet_type`        | uint8   | 1 byte  |
-| 4      | `device_mac`         | byte[6] | 6 bytes |
-| 10     | `sequence`           | uint32  | 4 bytes |
-| 14     | `timestamp_us`       | uint32  | 4 bytes |
-| 18     | `angle_status`       | uint16  | 2 bytes |
-| 20     | `sync_token`         | uint32  | 4 bytes |
+V3 packets share a four-byte header: magic `0x4950`, version `3`, and packet type. Every application integer is big-endian. Samples are 20 bytes and contain a 2-byte assigned device ID, sequence, timestamp, angle/state and sync token. Valid IDs are `0x0000` through `0x00FF`; V3 registration requests carry the station MAC only during startup. See [`protocol/protocol.md`](../protocol/protocol.md) for all packet layouts and registration behavior.
 
-**Version 3 sample size: 24 bytes.** The device and server use 32-bit wrapping microsecond counters, with modular comparisons limited to intervals below 2^31 microseconds. The server's monotonic time origin is captured at the start of `main`. Only version 3 packets are accepted. See [`protocol/protocol.md`](../protocol/protocol.md) for timestamp, sync, and latency formulas.
-
-In `angle_status`, the upper two bits encode state (`00` valid, `01` I2C error) and the lower 14 bits carry the raw MT6701 angle. I2C errors require the angle bits to be zero; states `10` and `11` are reserved.
-
-The `timestamp_us` field is the low 32 bits of the ESP32's local monotonic time at the start of the MT6701 I2C read. A four-timestamp exchange over the selected transport lets the server calculate each node's modular clock offset. The server uses that offset and the matching session token to calculate sample-to-receive latency percentiles. ESP-NOW latency includes gateway and serial buffering. The metric does not model or subtract MT6701 internal measurement delay. See [`protocol/protocol.md`](../protocol/protocol.md) for field semantics and status bits.
+The device and server use 32-bit wrapping microsecond counters, with modular comparisons limited to intervals below 2^31 microseconds. The server's monotonic time origin is captured at startup. Only V3 packets are accepted. The `timestamp_us` field is captured at the start of the MT6701 I2C read. A four-timestamp exchange lets the server calculate each node's modular clock offset and sample-to-receive latency percentiles. ESP-NOW latency includes gateway and serial buffering and does not model MT6701 internal measurement delay.
 
 ## Device Identification
 
-All nodes use the same firmware and include their Wi-Fi station MAC in each sample packet. The server configuration maps each observed MAC address to a logical device name or sensor role. The firmware does not carry a per-node numeric ID; adding or remapping a node does not require rebuilding its image.
+All nodes use the same firmware. On startup each registers its Wi-Fi station MAC and receives a server-assigned 2-byte ID; subsequent samples and synchronization packets carry only that ID. The server maps configured MACs to logical names and assigns IDs deterministically by logical name, so adding or remapping a sensor does not require rebuilding firmware.
 
 ## Current Scope
 

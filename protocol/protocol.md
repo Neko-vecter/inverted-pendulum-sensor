@@ -10,14 +10,15 @@ This document defines the only supported wire protocol between ESP32 sensor node
 | Optional transport | Wi-Fi / UDP over IPv4 |
 | ESP-NOW channel | 1 by default; sensor and gateway must match |
 | Sample target | 1,000 packets/s per node |
-| Sample packet | 24 bytes |
-| Sync request | 18 bytes |
-| Sync response | 30 bytes |
-| Sync completion report | 26 bytes |
+| Registration request / response | 14 / 16 bytes |
+| Sample packet | 20 bytes |
+| Sync request | 14 bytes |
+| Sync response | 26 bytes |
+| Sync completion report | 22 bytes |
 | Byte order | Big-endian for multi-byte fields |
 | Retransmission | None |
 
-ESP-NOW uses unencrypted broadcast on a fixed channel. Broadcast submission is not a receiver acknowledgement. The gateway checks each sensor packet's embedded MAC against its radio source MAC before forwarding it. One gateway/server should be active per channel.
+ESP-NOW uses unencrypted broadcast on a fixed channel. Broadcast submission is not a receiver acknowledgement. The gateway checks a registration request's embedded MAC against its radio source MAC. After assignment, it validates each packet's device ID against the MAC learned from the server's registration response. One gateway/server should be active per channel.
 
 ### Serial framing
 
@@ -29,7 +30,7 @@ The bidirectional serial envelope is:
 
 CRC-16/CCITT-FALSE covers the payload: polynomial `0x1021`, initial value `0xFFFF`, no reflection, no final XOR, checksum high byte first. For `123456789`, the CRC is `0x29B1`. Payload `49 00 50` encodes to `00 02 49 04 50 15 55 00`.
 
-The largest protocol payload is the 30-byte sync response. The maximum encoded frame is 35 bytes including delimiters. Receivers buffer across reads, process multiple frames per read, reject malformed, CRC-invalid, or oversized frames, and recover at the next zero delimiter. Application logs must use a separate console.
+The largest protocol payload is the 26-byte sync response. The maximum encoded frame is 31 bytes including delimiters. Receivers buffer across reads, process multiple frames per read, reject malformed, CRC-invalid, or oversized frames, and recover at the next zero delimiter. Application logs must use a separate console.
 
 ## Common header
 
@@ -39,9 +40,36 @@ Every packet begins with this four-byte header:
 | ---: | ---: | --- | --- |
 | 0 | 2 | magic | Unsigned 16-bit big-endian, `0x4950` |
 | 2 | 1 | version | `3` |
-| 3 | 1 | packet_type | Sample `0x01`, sync request `0x02`, sync response `0x03`, sync completion report `0x04` |
+| 3 | 1 | packet_type | Sample `0x01`, sync request `0x02`, sync response `0x03`, sync completion report `0x04`, registration request `0x05`, registration response `0x06` |
 
-Unknown magic, versions, packet types, or packet lengths are rejected. No V2 compatibility path is supported.
+Unknown magic, versions, packet types, or packet lengths are rejected. No V2 compatibility path is supported. Device IDs are encoded as unsigned 16-bit values and are restricted to `0x0000` through `0x00FF`.
+
+## Startup registration and device ID assignment
+
+After boot or transport reconnection, a sensor repeatedly sends a registration request until it receives an assignment. The request contains its station MAC and a request sequence. The server looks up the MAC in its `[devices]` configuration and replies only for a configured sensor. IDs are assigned from `0x0000` through `0x00FF`, in ascending logical device name order, so the same configuration yields stable assignments across server restarts. A maximum of 256 devices can be configured.
+
+The sensor accepts a response only when its MAC and request sequence match the pending request. The gateway learns the ID-to-MAC mapping from the response before broadcasting it to sensors. Until assigned, a sensor sends no samples or time-sync packets. Registration retries occur about once per second.
+
+### Registration request: sensor to server
+
+| Offset | Length | Field | Encoding |
+| ---: | ---: | --- | --- |
+| 0 | 4 | Header | Version 3, type `0x05` |
+| 4 | 6 | device_mac | Raw station MAC octets |
+| 10 | 4 | registration_sequence | Unsigned 32-bit request sequence |
+
+Total request length is **14 bytes**.
+
+### Registration response: server to sensor
+
+| Offset | Length | Field | Encoding |
+| ---: | ---: | --- | --- |
+| 0 | 4 | Header | Version 3, type `0x06` |
+| 4 | 6 | device_mac | Echoed station MAC |
+| 10 | 4 | registration_sequence | Echoed request sequence |
+| 14 | 2 | device_id | Assigned ID, unsigned 16-bit big-endian; valid range `0x0000` to `0x00FF` |
+
+Total response length is **16 bytes**.
 
 ## Sample packet
 
@@ -52,17 +80,17 @@ The sample packet is encoded field by field, without compiler padding.
 | 0 | 2 | magic | `0x4950` |
 | 2 | 1 | version | `3` |
 | 3 | 1 | packet_type | Sample `0x01` |
-| 4 | 6 | device_mac | Raw station MAC octets |
-| 10 | 4 | sequence | Unsigned 32-bit sampling-slot counter |
-| 14 | 4 | timestamp_us | Unsigned 32-bit wrapping device microseconds |
-| 18 | 2 | angle_status | State in the upper two bits; raw angle in the lower 14 bits |
-| 20 | 4 | sync_token | Current server-process token; zero means unsynchronized |
+| 4 | 2 | device_id | Assigned ID from the startup registration exchange |
+| 6 | 4 | sequence | Unsigned 32-bit sampling-slot counter |
+| 10 | 4 | timestamp_us | Unsigned 32-bit wrapping device microseconds |
+| 14 | 2 | angle_status | State in the upper two bits; raw angle in the lower 14 bits |
+| 16 | 4 | sync_token | Current server-process token; zero means unsynchronized |
 
-Total sample length is **24 bytes**.
+Total sample length is **20 bytes**.
 
 The MT6701 angle is a 14-bit unsigned count. For a valid reading, `angle_status[15:14]` is `00` and `angle_status[13:0]` contains 0 through 16,383. Convert it to degrees with `raw_angle * 360.0 / 16384.0`. State `01` means I2C error and requires all lower angle bits to be zero. States `10` and `11` are reserved and rejected.
 
-The MAC identifies the sensor and maps to a logical device name in server configuration. The 32-bit sequence begins at zero after boot and advances for each sampling slot, including slots whose sample is not transmitted. The server uses modular differences to estimate packet loss; it cannot distinguish network loss from samples omitted by firmware.
+The assigned device ID identifies the sensor and maps to its configured logical device name. The station MAC is used only for registration and the registration response. The 32-bit sequence begins at zero after boot and advances for each sampling slot, including slots whose sample is not transmitted. The server uses modular differences to estimate packet loss; it cannot distinguish network loss from samples omitted by firmware.
 
 `timestamp_us` is the low 32 bits of the ESP32 monotonic microsecond timer, captured immediately before the MT6701 I2C read. It wraps every 2^32 microseconds (about 71 minutes 35 seconds). The latency metric includes I2C acquisition after this timestamp, firmware queueing, transport and server receive scheduling; it does not model MT6701 internal measurement delay.
 
@@ -70,45 +98,45 @@ The nonzero 32-bit `sync_token` changes when the server process starts. The serv
 
 ## Time synchronization
 
-The server replies only to requests from configured device MACs. The exchange uses four timestamps: device `t1` before sending the request, server `t2` on request receipt, server `t3` immediately before responding, and device `t4` on response receipt. The sensor then sends a completion report so the server can calculate and retain the mapping. Exchanges occur about once per second.
+The server replies only to time-sync requests containing a configured device ID. The exchange uses four timestamps: device `t1` before sending the request, server `t2` on request receipt, server `t3` immediately before responding, and device `t4` on response receipt. The sensor then sends a completion report so the server can calculate and retain the mapping. Exchanges occur about once per second.
 
 ### Request: sensor to server
 
 | Offset | Length | Field | Encoding |
 | ---: | ---: | --- | --- |
 | 0 | 4 | Header | Version 3, type `0x02` |
-| 4 | 6 | device_mac | Raw station MAC octets |
-| 10 | 4 | sync_sequence | Unsigned 32-bit sequence |
-| 14 | 4 | device_t1_us | Device timestamp before request encoding/send |
+| 4 | 2 | device_id | Assigned device ID |
+| 6 | 4 | sync_sequence | Unsigned 32-bit sequence |
+| 10 | 4 | device_t1_us | Device timestamp before request encoding/send |
 
-Total request length is **18 bytes**.
+Total request length is **14 bytes**.
 
 ### Response: server to sensor
 
 | Offset | Length | Field | Encoding |
 | ---: | ---: | --- | --- |
 | 0 | 4 | Header | Version 3, type `0x03` |
-| 4 | 6 | device_mac | Echoed station MAC |
-| 10 | 4 | sync_sequence | Echoed request sequence |
-| 14 | 4 | device_t1_us | Echoed device timestamp |
-| 18 | 4 | server_t2_us | Server timestamp when request was received |
-| 22 | 4 | server_t3_us | Server timestamp before response encoding/send |
-| 26 | 4 | sync_token | Current nonzero server-process token |
+| 4 | 2 | device_id | Assigned device ID |
+| 6 | 4 | sync_sequence | Echoed request sequence |
+| 10 | 4 | device_t1_us | Echoed device timestamp |
+| 14 | 4 | server_t2_us | Server timestamp when request was received |
+| 18 | 4 | server_t3_us | Server timestamp before response encoding/send |
+| 22 | 4 | sync_token | Current nonzero server-process token |
 
-Total response length is **30 bytes**. The sensor accepts only a response matching its MAC, pending sequence, and request timestamp, and captures `device_t4_us` when the response arrives.
+Total response length is **26 bytes**. The sensor accepts only a response matching its assigned ID, pending sequence, and request timestamp, and captures `device_t4_us` when the response arrives.
 
 ### Completion report: sensor to server
 
 | Offset | Length | Field | Encoding |
 | ---: | ---: | --- | --- |
 | 0 | 4 | Header | Version 3, type `0x04` |
-| 4 | 6 | device_mac | Raw station MAC octets |
-| 10 | 4 | sync_sequence | Echoed request sequence |
-| 14 | 4 | device_t1_us | Echoed request timestamp |
-| 18 | 4 | device_t4_us | Device timestamp when matching response arrived |
-| 22 | 4 | sync_token | Token echoed from the response |
+| 4 | 2 | device_id | Assigned device ID |
+| 6 | 4 | sync_sequence | Echoed request sequence |
+| 10 | 4 | device_t1_us | Echoed request timestamp |
+| 14 | 4 | device_t4_us | Device timestamp when matching response arrived |
+| 18 | 4 | sync_token | Token echoed from the response |
 
-Total report length is **26 bytes**. The server accepts a report only if it matches the outstanding request for that MAC and the server's current token.
+Total report length is **22 bytes**. The server accepts a report only if it matches the outstanding request for that ID and the server's current token.
 
 All time calculations use modulo-2^32 differences. Forward intervals must be less than 2^31 microseconds. The server computes:
 
@@ -139,4 +167,4 @@ The server reports P50, P75, P90, and P99 per configured device and statistics i
 
 ## Scope
 
-The protocol defines sensor samples and clock synchronization only. It has no acknowledgements, remote configuration, or start/stop commands.
+The protocol includes startup registration and assignment of a device ID, sensor samples, and clock synchronization. It has no general remote configuration or start/stop commands.

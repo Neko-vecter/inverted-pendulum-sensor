@@ -19,6 +19,7 @@
 #define SAMPLE_PERIOD_US 1000U
 #define SAMPLE_STATS_INTERVAL_US 5000000U
 #define CLOCK_SYNC_INTERVAL_US 1000000U
+#define REGISTRATION_RETRY_US 1000000U
 #define CLOCK_SYNC_STALE_AFTER_US 3000000U
 #define CLOCK_SYNC_MAX_RTT_US 1000000U
 #define COUNTER_HALF_RANGE_US 0x80000000U
@@ -38,6 +39,18 @@ static i2c_master_bus_handle_t s_i2c_bus;
 static i2c_master_dev_handle_t s_mt6701;
 static uint8_t s_station_mac[6];
 static bool s_network_enabled;
+
+typedef struct {
+    bool assigned;
+    bool request_pending;
+    bool schedule_valid;
+    uint16_t device_id;
+    uint32_t next_sequence;
+    uint32_t pending_sequence;
+    uint32_t next_request_us;
+} device_registration_t;
+
+static device_registration_t s_registration;
 
 typedef struct {
     bool valid;
@@ -76,11 +89,23 @@ static uint32_t process_time_sync_responses(uint32_t *sync_errors_in_interval)
             break;
         }
 
+        sensor_registration_response_t registration = {0};
+        if (sensor_protocol_decode_registration_response(packet, (size_t)packet_length, &registration)) {
+            if (memcmp(registration.mac, s_station_mac, sizeof(s_station_mac)) == 0 &&
+                s_registration.request_pending && registration.sequence == s_registration.pending_sequence &&
+                registration.device_id <= 0xffU) {
+                s_registration.device_id = registration.device_id;
+                s_registration.assigned = true;
+                s_registration.request_pending = false;
+                ESP_LOGI(TAG, "Assigned device ID=0x%04X", registration.device_id);
+            }
+            continue;
+        }
         sensor_time_sync_response_t response = {0};
-        if (!sensor_protocol_decode_time_sync_response(packet,
+        if (!s_registration.assigned || !sensor_protocol_decode_time_sync_response(packet,
                                                        (size_t)packet_length,
                                                        &response) ||
-            memcmp(response.mac, s_station_mac, sizeof(s_station_mac)) != 0 ||
+            response.device_id != s_registration.device_id ||
             !s_clock_sync.request_pending ||
             response.sequence != s_clock_sync.pending_sequence ||
             response.device_t1_us != s_clock_sync.pending_t1_us ||
@@ -104,7 +129,7 @@ static uint32_t process_time_sync_responses(uint32_t *sync_errors_in_interval)
 
         uint8_t report[SENSOR_PROTOCOL_SYNC_REPORT_SIZE];
         const size_t report_length = sensor_protocol_encode_time_sync_report(
-            s_station_mac, response.sequence, response.device_t1_us, device_t4_us,
+            s_registration.device_id, response.sequence, response.device_t1_us, device_t4_us,
             response.sync_token, report);
         if (report_length == 0U || !sensor_transport_send(report, report_length)) {
             ++(*sync_errors_in_interval);
@@ -122,6 +147,18 @@ static uint32_t process_time_sync_responses(uint32_t *sync_errors_in_interval)
     return updates;
 }
 
+static void send_registration_request(uint32_t now_us)
+{
+    if (s_registration.assigned || (s_registration.schedule_valid &&
+        !counter_deadline_reached(now_us, s_registration.next_request_us))) return;
+    uint8_t packet[SENSOR_PROTOCOL_REGISTRATION_REQUEST_SIZE];
+    const uint32_t sequence = s_registration.next_sequence++;
+    const size_t length = sensor_protocol_encode_registration_request(s_station_mac, sequence, packet);
+    if (sensor_transport_send(packet, length)) { s_registration.pending_sequence = sequence; s_registration.request_pending = true; }
+    s_registration.next_request_us = now_us + REGISTRATION_RETRY_US;
+    s_registration.schedule_valid = true;
+}
+
 static void send_time_sync_request(uint32_t now_us,
                                    uint32_t *sync_errors_in_interval)
 {
@@ -133,8 +170,9 @@ static void send_time_sync_request(uint32_t now_us,
     uint8_t packet[SENSOR_PROTOCOL_SYNC_REQUEST_SIZE];
     const uint32_t device_t1_us = monotonic_counter_us();
     const uint32_t sequence = s_clock_sync.next_sequence++;
+    if (!s_registration.assigned) { return; }
     const size_t packet_length = sensor_protocol_encode_time_sync_request(
-        s_station_mac, sequence, device_t1_us, packet);
+        s_registration.device_id, sequence, device_t1_us, packet);
     if (sensor_transport_send(packet, packet_length)) {
         s_clock_sync.pending_sequence = sequence;
         s_clock_sync.pending_t1_us = device_t1_us;
@@ -162,6 +200,9 @@ static void sender_task(void *argument)
             s_clock_sync.valid = false;
             s_clock_sync.request_pending = false;
             s_clock_sync.request_schedule_valid = false;
+            s_registration.assigned = false;
+            s_registration.request_pending = false;
+            s_registration.schedule_valid = false;
             vTaskDelay(pdMS_TO_TICKS(50U));
             continue;
         }
@@ -173,6 +214,8 @@ static void sender_task(void *argument)
                 CLOCK_SYNC_STALE_AFTER_US) {
             s_clock_sync.valid = false;
         }
+        send_registration_request(now_us);
+        if (!s_registration.assigned) { (void)xQueueReset(s_sample_queue); vTaskDelay(pdMS_TO_TICKS(10U)); continue; }
         send_time_sync_request(now_us, &sync_errors_in_interval);
 
         sensor_sample_t sample;
@@ -189,6 +232,7 @@ static void sender_task(void *argument)
                 CLOCK_SYNC_STALE_AFTER_US) {
             s_clock_sync.valid = false;
         }
+        sample.device_id = s_registration.device_id;
         sample.sync_token = s_clock_sync.valid ? s_clock_sync.sync_token : 0U;
         uint8_t packet[SENSOR_PROTOCOL_PACKET_SIZE];
         const size_t packet_length = sensor_protocol_encode_sample(&sample, packet);
@@ -241,7 +285,6 @@ static void sampling_task(void *argument)
         }
 
         sensor_sample_t sample = {0};
-        memcpy(sample.mac, s_station_mac, sizeof(sample.mac));
         sample.sequence = sequence++;
         sample.timestamp_us = monotonic_counter_us();
         first_sample = false;

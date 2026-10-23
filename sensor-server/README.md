@@ -1,6 +1,6 @@
 # Rust sensor server
 
-This server receives the 24-byte ESP32 version 3 sample format over ESP-NOW gateway serial or UDP, maps each packet's station MAC address to a logical sensor name, handles V3 time-sync requests and completion reports, and reports each sensor's latest reading and reception statistics. Only version 3 packets are supported. The wire format is defined in [`../protocol/protocol.md`](../protocol/protocol.md).
+This server receives V3 packets over ESP-NOW gateway serial or UDP. Sensors register with their station MAC at startup; the server assigns a stable 2-byte ID based on the configured logical name. Samples and time-sync packets then carry only that ID. The server handles registration and time-sync exchanges and reports each sensor's latest reading and reception statistics. Only V3 packets are supported. The wire format is defined in [`../protocol/protocol.md`](../protocol/protocol.md).
 
 ## Configure
 
@@ -52,7 +52,7 @@ For UDP mode, allow incoming traffic on the configured port and configure each n
 - Latest angle, firmware sequence, local timestamp, and packet age.
 - P50, P75, P90, and P99 sample-to-server receive latency for synchronized version 3 samples, plus sync round-trip time and counts of unsynced or clock-ahead samples.
 - Sequence gaps, estimated lost samples, duplicates, out-of-order packets, and timestamp-detected restarts.
-- Sensor I2C errors, malformed packets, unknown MAC addresses, receive errors, and serial framing errors.
+- Sensor I2C errors, malformed packets, unassigned device IDs, receive errors, and serial framing errors.
 
 Sequence-based loss is an estimate from received sequence numbers. It cannot distinguish network loss from samples omitted by the firmware before sending. Latency uses the device timestamp taken immediately before the MT6701 I2C read and a four-timestamp clock-sync exchange over the selected transport. ESP-NOW latency includes gateway buffering and the serial hop; path asymmetry can affect the estimate. Device and server wire times are 32-bit wrapping microsecond counters; modular differences are unambiguous for intervals below 2^31 microseconds. The server time origin is captured at the start of main. Latency is an estimate affected by round-trip path asymmetry and clock scheduling. The metric does not model or subtract MT6701 internal measurement delay. The server retains at most 50,000 latency samples per device per statistics interval for percentile calculation.
 

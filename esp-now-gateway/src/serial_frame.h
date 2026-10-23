@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 // COBS(payload || CRC16-CCITT-FALSE big endian), delimited by zero bytes.
-#define SERIAL_PAYLOAD_MAX 30U
+#define SERIAL_PAYLOAD_MAX 26U
 #define SERIAL_ENCODED_MAX (SERIAL_PAYLOAD_MAX + 3U)
 #define SERIAL_FRAME_MAX (SERIAL_ENCODED_MAX + 2U)
 

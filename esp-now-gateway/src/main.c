@@ -1,4 +1,5 @@
 #include <inttypes.h>
+#include <stdbool.h>
 #include <string.h>
 #include "sdkconfig.h"
 #include "esp_log.h"
@@ -23,6 +24,10 @@ static const char *TAG = "espnow_gateway";
 static QueueHandle_t s_packets;
 static portMUX_TYPE s_stats_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t s_queue_drops;
+static portMUX_TYPE s_binding_lock = portMUX_INITIALIZER_UNLOCKED;
+typedef struct { bool valid; uint8_t mac[6]; } sensor_binding_t;
+static sensor_binding_t s_bindings[256];
+static uint16_t read_u16_be(const uint8_t *p) { return (uint16_t)(((uint16_t)p[0] << 8) | p[1]); }
 
 typedef struct {
     uint8_t data[SERIAL_PAYLOAD_MAX];
@@ -73,23 +78,26 @@ static void serial_start(void)
 
 static void receive_packet(const esp_now_recv_info_t *info, const uint8_t *data, int length)
 {
-    if (info == NULL || info->src_addr == NULL || data == NULL ||
-        (length != SENSOR_PROTOCOL_PACKET_SIZE &&
-         length != SENSOR_PROTOCOL_SYNC_REQUEST_SIZE &&
-         length != SENSOR_PROTOCOL_SYNC_REPORT_SIZE) ||
-        data[0] != 0x49 || data[1] != 0x50 || data[2] != SENSOR_PROTOCOL_VERSION ||
-        !((data[3] == SENSOR_PROTOCOL_TYPE_SAMPLE && length == SENSOR_PROTOCOL_PACKET_SIZE) ||
-          (data[3] == SENSOR_PROTOCOL_TYPE_TIME_SYNC_REQUEST && length == SENSOR_PROTOCOL_SYNC_REQUEST_SIZE) ||
-          (data[3] == SENSOR_PROTOCOL_TYPE_TIME_SYNC_REPORT && length == SENSOR_PROTOCOL_SYNC_REPORT_SIZE)) ||
-        memcmp(info->src_addr, data + 4, 6) != 0) {
-        return;
+    if (info == NULL || info->src_addr == NULL || data == NULL || length < 4 ||
+        data[0] != 0x49 || data[1] != 0x50 || data[2] != SENSOR_PROTOCOL_VERSION) return;
+    bool valid = false;
+    if (data[3] == SENSOR_PROTOCOL_TYPE_REGISTRATION_REQUEST && length == SENSOR_PROTOCOL_REGISTRATION_REQUEST_SIZE) {
+        valid = memcmp(info->src_addr, data + 4, 6) == 0;
+    } else if ((data[3] == SENSOR_PROTOCOL_TYPE_SAMPLE && length == SENSOR_PROTOCOL_PACKET_SIZE) ||
+               (data[3] == SENSOR_PROTOCOL_TYPE_TIME_SYNC_REQUEST && length == SENSOR_PROTOCOL_SYNC_REQUEST_SIZE) ||
+               (data[3] == SENSOR_PROTOCOL_TYPE_TIME_SYNC_REPORT && length == SENSOR_PROTOCOL_SYNC_REPORT_SIZE)) {
+        const uint16_t id = read_u16_be(data + 4);
+        if (id <= 0xffU) {
+            portENTER_CRITICAL(&s_binding_lock);
+            valid = s_bindings[id].valid && memcmp(info->src_addr, s_bindings[id].mac, 6) == 0;
+            portEXIT_CRITICAL(&s_binding_lock);
+        }
     }
+    if (!valid) return;
     gateway_packet_t packet = {.length = (size_t)length};
     memcpy(packet.data, data, packet.length);
     if (xQueueSend(s_packets, &packet, 0) != pdTRUE) {
-        portENTER_CRITICAL(&s_stats_lock);
-        ++s_queue_drops;
-        portEXIT_CRITICAL(&s_stats_lock);
+        portENTER_CRITICAL(&s_stats_lock); ++s_queue_drops; portEXIT_CRITICAL(&s_stats_lock);
     }
 }
 
@@ -144,14 +152,19 @@ static void forward_to_nodes(void *argument)
             const size_t size = overflow ? 0 : serial_frame_decode(encoded, used, packet);
             used = 0;
             overflow = false;
-            if (size == SENSOR_PROTOCOL_SYNC_RESPONSE_SIZE &&
-                packet[0] == 0x49 && packet[1] == 0x50 &&
-                packet[2] == SENSOR_PROTOCOL_VERSION &&
-                packet[3] == SENSOR_PROTOCOL_TYPE_TIME_SYNC_RESPONSE) {
-                const esp_err_t err = espnow_radio_send(packet, size);
-                if (err != ESP_OK) {
-                    ESP_LOGW(TAG, "Time-sync forward failed: %s", esp_err_to_name(err));
+            const bool sync_response = size == SENSOR_PROTOCOL_SYNC_RESPONSE_SIZE && packet[3] == SENSOR_PROTOCOL_TYPE_TIME_SYNC_RESPONSE;
+            const bool registration_response = size == SENSOR_PROTOCOL_REGISTRATION_RESPONSE_SIZE && packet[3] == SENSOR_PROTOCOL_TYPE_REGISTRATION_RESPONSE;
+            if (size >= 4 && packet[0] == 0x49 && packet[1] == 0x50 && packet[2] == SENSOR_PROTOCOL_VERSION && (sync_response || registration_response)) {
+                if (registration_response) {
+                    const uint16_t id = read_u16_be(packet + 14);
+                    if (id > 0xffU) continue;
+                    portENTER_CRITICAL(&s_binding_lock);
+                    s_bindings[id].valid = true;
+                    memcpy(s_bindings[id].mac, packet + 4, 6);
+                    portEXIT_CRITICAL(&s_binding_lock);
                 }
+                const esp_err_t err = espnow_radio_send(packet, size);
+                if (err != ESP_OK) ESP_LOGW(TAG, "Server response forward failed: %s", esp_err_to_name(err));
             }
         }
     }

@@ -2,7 +2,7 @@ use crate::protocol::{DecodeError, MacAddress, SensorSample, TimeSyncReport, Tim
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
-const MAX_REPORTED_UNKNOWN_MACS: usize = 32;
+const MAX_REPORTED_UNKNOWN_IDS: usize = 32;
 const MAX_LATENCY_PERCENTILE_SAMPLES: usize = 50_000;
 const COUNTER_HALF_RANGE_US: u32 = 0x8000_0000;
 const CLOCK_SYNC_MAX_RTT_US: u32 = 1_000_000;
@@ -20,6 +20,7 @@ struct PendingSync {
 pub struct DeviceState {
     pub logical_name: String,
     pub mac: MacAddress,
+    pub device_id: u16,
     pub latest: Option<LatestSample>,
     pub received_total: u64,
     pub interval_received: u64,
@@ -49,10 +50,11 @@ pub struct LatestSample {
 }
 
 impl DeviceState {
-    fn new(logical_name: String, mac: MacAddress, sync_token: u32) -> Self {
+    fn new(logical_name: String, mac: MacAddress, device_id: u16, sync_token: u32) -> Self {
         Self {
             logical_name,
             mac,
+            device_id,
             latest: None,
             received_total: 0,
             interval_received: 0,
@@ -249,24 +251,34 @@ fn timestamp_is_not_older(sample_timestamp: u32, latest_timestamp: u32) -> bool 
 #[derive(Debug)]
 pub struct DeviceRegistry {
     by_mac: HashMap<MacAddress, String>,
+    by_id: HashMap<u16, String>,
     pub by_name: BTreeMap<String, DeviceState>,
 }
 
 impl DeviceRegistry {
     pub fn new(devices_by_mac: HashMap<MacAddress, String>, sync_token: u32) -> Self {
-        let by_name = devices_by_mac
+        let mut sorted: Vec<_> = devices_by_mac
             .iter()
-            .map(|(mac, name)| {
-                (
-                    name.clone(),
-                    DeviceState::new(name.clone(), *mac, sync_token),
-                )
-            })
+            .map(|(mac, name)| (*mac, name.clone()))
             .collect();
+        sorted.sort_by(|a, b| a.1.cmp(&b.1));
+        let mut by_name = BTreeMap::new();
+        let mut by_id = HashMap::new();
+        for (index, (mac, name)) in sorted.into_iter().enumerate() {
+            let id = index as u16;
+            by_id.insert(id, name.clone());
+            by_name.insert(name.clone(), DeviceState::new(name, mac, id, sync_token));
+        }
         Self {
             by_mac: devices_by_mac,
+            by_id,
             by_name,
         }
+    }
+
+    pub fn id_for_mac(&self, mac: MacAddress) -> Option<u16> {
+        let name = self.by_mac.get(&mac)?;
+        self.by_name.get(name).map(|state| state.device_id)
     }
 
     pub fn record(
@@ -275,7 +287,7 @@ impl DeviceRegistry {
         received_at: Instant,
         server_now_us: u32,
     ) -> bool {
-        let Some(name) = self.by_mac.get(&sample.device_mac) else {
+        let Some(name) = self.by_id.get(&sample.device_id) else {
             return false;
         };
         if let Some(state) = self.by_name.get_mut(name) {
@@ -286,8 +298,8 @@ impl DeviceRegistry {
         }
     }
 
-    pub fn contains_mac(&self, mac: MacAddress) -> bool {
-        self.by_mac.contains_key(&mac)
+    pub fn contains_id(&self, id: u16) -> bool {
+        self.by_id.contains_key(&id)
     }
 
     pub fn begin_sync(
@@ -296,7 +308,7 @@ impl DeviceRegistry {
         server_t2_us: u32,
         server_t3_us: u32,
     ) -> bool {
-        let Some(name) = self.by_mac.get(&request.device_mac) else {
+        let Some(name) = self.by_id.get(&request.device_id) else {
             return false;
         };
         if let Some(state) = self.by_name.get_mut(name) {
@@ -308,7 +320,7 @@ impl DeviceRegistry {
     }
 
     pub fn complete_sync(&mut self, report: TimeSyncReport) -> bool {
-        let Some(name) = self.by_mac.get(&report.device_mac) else {
+        let Some(name) = self.by_id.get(&report.device_id) else {
             return false;
         };
         self.by_name
@@ -364,7 +376,7 @@ pub struct ServerMetrics {
     mapped_interval: u64,
     unknown_interval: u64,
     malformed_by_kind: BTreeMap<DecodeError, u64>,
-    unknown_by_mac: BTreeMap<MacAddress, u64>,
+    unknown_by_id: BTreeMap<u16, u64>,
     unknown_unlisted: u64,
 }
 
@@ -379,13 +391,13 @@ impl ServerMetrics {
         self.mapped_interval += 1;
     }
 
-    pub fn record_unknown(&mut self, mac: MacAddress) {
+    pub fn record_unknown(&mut self, id: u16) {
         self.unknown_total += 1;
         self.unknown_interval += 1;
-        if let Some(count) = self.unknown_by_mac.get_mut(&mac) {
+        if let Some(count) = self.unknown_by_id.get_mut(&id) {
             *count += 1;
-        } else if self.unknown_by_mac.len() < MAX_REPORTED_UNKNOWN_MACS {
-            self.unknown_by_mac.insert(mac, 1);
+        } else if self.unknown_by_id.len() < MAX_REPORTED_UNKNOWN_IDS {
+            self.unknown_by_id.insert(id, 1);
         } else {
             self.unknown_unlisted += 1;
         }
@@ -406,7 +418,7 @@ impl ServerMetrics {
             mapped: std::mem::take(&mut self.mapped_interval),
             unknown: std::mem::take(&mut self.unknown_interval),
             malformed: std::mem::take(&mut self.malformed_by_kind),
-            unknown_by_mac: std::mem::take(&mut self.unknown_by_mac),
+            unknown_by_id: std::mem::take(&mut self.unknown_by_id),
             unknown_unlisted: std::mem::take(&mut self.unknown_unlisted),
         }
     }
@@ -418,7 +430,7 @@ pub struct MetricsInterval {
     pub mapped: u64,
     pub unknown: u64,
     pub malformed: BTreeMap<DecodeError, u64>,
-    pub unknown_by_mac: BTreeMap<MacAddress, u64>,
+    pub unknown_by_id: BTreeMap<u16, u64>,
     pub unknown_unlisted: u64,
 }
 

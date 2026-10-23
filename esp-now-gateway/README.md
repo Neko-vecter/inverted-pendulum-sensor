@@ -34,11 +34,11 @@ baud_rate = 921600
 "AA:BB:CC:DD:EE:01" = "sensor_1"
 ```
 
-Device mappings use the sensor station MAC, not the gateway MAC. ESP-NOW uses unencrypted broadcast; use one active gateway/server per channel. The gateway checks each incoming sensor packet's embedded MAC against its radio source MAC before forwarding it.
+Device mappings use the sensor station MAC, not the gateway MAC. ESP-NOW uses unencrypted broadcast; use one active gateway/server per channel. The gateway checks registration MACs against the radio source MAC, then validates later device IDs against the MAC learned from the server's assignment response.
 
 ## Serial framing
 
-Each message is `0x00 || COBS(payload || CRC16_BE) || 0x00`. CRC is CRC-16/CCITT-FALSE: polynomial `0x1021`, initial value `0xFFFF`, no reflection, no final XOR; it covers only the payload. Payload bytes are unchanged version 3 wire packets. Samples are 24 bytes, requests 18 bytes, responses 30 bytes and completion reports 26 bytes. The maximum serial frame is 35 bytes. Empty delimiters are ignored; invalid, oversized or corrupt frames are discarded, with recovery at the next zero delimiter.
+Each message is `0x00 || COBS(payload || CRC16_BE) || 0x00`. CRC is CRC-16/CCITT-FALSE: polynomial `0x1021`, initial value `0xFFFF`, no reflection, no final XOR; it covers only the payload. Payload bytes are unchanged V3 wire packets. Registration requests/responses are 14/16 bytes, samples are 20 bytes, and time-sync requests/responses/reports are 14/26/22 bytes. The maximum serial frame is 31 bytes. Empty delimiters are ignored; invalid, oversized or corrupt frames are discarded, with recovery at the next zero delimiter.
 
 Radio callbacks enqueue into a bounded queue and never write serial. Separate tasks handle each serial direction. Queues and USB buffers are bounded; when the host cannot keep up, packets are dropped and the firmware logs counters. A successful serial write or radio submission does not confirm end-to-end delivery.
 
