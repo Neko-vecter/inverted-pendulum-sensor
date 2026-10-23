@@ -1,4 +1,5 @@
 .pio
+src/config.h
 /sdkconfig.seeed_xiao_esp32c6
 /sdkconfig.seeed_xiao_esp32c6.old
 .vscode/.browse.c_cpp.db*
@@ -6,4 +7,3 @@
 .vscode/launch.json
 .vscode/ipch
 /.vscode
-/sdkconfig.seeed_xiao_esp32c6

@@ -7,17 +7,19 @@ Standalone ESP-IDF / PlatformIO firmware for the Seeed XIAO ESP32-C6. It receive
 Run from this directory:
 
 ```sh
+cp src/config.example.h src/config.h
 pio run -e seeed_xiao_esp32c6
 pio run -e seeed_xiao_esp32c6 -t upload
-pio run -e seeed_xiao_esp32c6 -t menuconfig
 ```
 
-Under **ESP-NOW gateway**, select the channel (default 1, matching every sensor) and host serial interface:
+Edit `src/config.h` to set the ESP-NOW channel and host serial interface. The
+local file is ignored by Git. The example uses channel 11; set it to the same
+channel configured on every sensor and the server.
 
-- **Native USB Serial/JTAG**, the default: connect the XIAO USB port to the server. Linux usually exposes `/dev/ttyACM0`; prefer a stable `/dev/serial/by-id/...` path. Windows uses a COM port. The baud setting does not limit native USB throughput.
-- **UART1**: use an external 3.3 V USB-UART adapter, common ground, gateway TX GPIO16 to adapter RX, gateway RX GPIO17 to adapter TX. Pins are configurable; default speed is 921600 baud, 8N1, no flow control. Three nodes at 1 kHz bring the default UART close to its practical limit; native USB is recommended for more headroom.
+- `GATEWAY_SERIAL_USB 1` uses native USB Serial/JTAG, the default: connect the XIAO USB port to the server. Linux usually exposes `/dev/ttyACM0`; prefer a stable `/dev/serial/by-id/...` path. Windows uses a COM port. The baud setting does not limit native USB throughput.
+- `GATEWAY_SERIAL_USB 0` uses UART1: use an external 3.3 V USB-UART adapter, common ground, gateway TX GPIO16 to adapter RX, gateway RX GPIO17 to adapter TX. Pins and speed are configurable through `GATEWAY_UART_TX_GPIO`, `GATEWAY_UART_RX_GPIO`, and `GATEWAY_UART_BAUD`; default speed is 921600 baud, 8N1, no flow control. Three nodes at 1 kHz bring the default UART close to its practical limit; native USB is recommended for more headroom.
 
-The native USB port carries binary data. Keep the primary console on UART0 and disable the secondary USB console, as specified in `sdkconfig.defaults`. An existing generated sdkconfig overrides defaults: change these console settings in menuconfig before building. A build guard prevents USB console output from corrupting data. Logs and five-second forwarding/error counters are available on UART0 at 115200 baud. Do not open a serial monitor on the data port while the server is using it.
+The native USB port carries binary data. Keep the primary console on UART0 and disable the secondary USB console, as specified in `sdkconfig.defaults`. An existing generated sdkconfig overrides these ESP-IDF defaults; use `pio run -e seeed_xiao_esp32c6 -t menuconfig` to change console settings if needed. A build guard prevents USB console output from corrupting data. Logs and five-second forwarding/error counters are available on UART0 at 115200 baud. Do not open a serial monitor on the data port while the server is using it.
 
 Configure the server:
 

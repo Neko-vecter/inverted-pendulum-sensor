@@ -1,6 +1,7 @@
 #include <inttypes.h>
 #include <stdbool.h>
 #include <string.h>
+#include "config.h"
 #include "sdkconfig.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -11,7 +12,7 @@
 #include "freertos/task.h"
 #include "sensor_protocol.h"
 #include "serial_frame.h"
-#if CONFIG_GATEWAY_SERIAL_USB
+#if GATEWAY_SERIAL_USB
 #include "driver/usb_serial_jtag.h"
 #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG || CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG
 #error "Disable the USB primary/secondary console before using USB for binary gateway data"
@@ -36,7 +37,7 @@ typedef struct {
 
 static int serial_read(uint8_t *data, size_t length)
 {
-#if CONFIG_GATEWAY_SERIAL_USB
+#if GATEWAY_SERIAL_USB
     return usb_serial_jtag_read_bytes(data, length, pdMS_TO_TICKS(20));
 #else
     return uart_read_bytes(UART_NUM_1, data, length, pdMS_TO_TICKS(20));
@@ -45,7 +46,7 @@ static int serial_read(uint8_t *data, size_t length)
 
 static bool serial_write(const uint8_t *data, size_t length)
 {
-#if CONFIG_GATEWAY_SERIAL_USB
+#if GATEWAY_SERIAL_USB
     return usb_serial_jtag_write_bytes(data, length, pdMS_TO_TICKS(20)) == (int)length;
 #else
     return uart_write_bytes(UART_NUM_1, data, length) == (int)length;
@@ -54,14 +55,14 @@ static bool serial_write(const uint8_t *data, size_t length)
 
 static void serial_start(void)
 {
-#if CONFIG_GATEWAY_SERIAL_USB
+#if GATEWAY_SERIAL_USB
     usb_serial_jtag_driver_config_t config = {
         .tx_buffer_size = 8192, .rx_buffer_size = 1024,
     };
     ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&config));
 #else
     const uart_config_t config = {
-        .baud_rate = CONFIG_GATEWAY_UART_BAUD,
+        .baud_rate = GATEWAY_UART_BAUD,
         .data_bits = UART_DATA_8_BITS,
         .parity = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
@@ -69,8 +70,8 @@ static void serial_start(void)
         .source_clk = UART_SCLK_DEFAULT,
     };
     ESP_ERROR_CHECK(uart_param_config(UART_NUM_1, &config));
-    ESP_ERROR_CHECK(uart_set_pin(UART_NUM_1, CONFIG_GATEWAY_UART_TX_GPIO,
-                               CONFIG_GATEWAY_UART_RX_GPIO,
+    ESP_ERROR_CHECK(uart_set_pin(UART_NUM_1, GATEWAY_UART_TX_GPIO,
+                               GATEWAY_UART_RX_GPIO,
                                UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
     ESP_ERROR_CHECK(uart_driver_install(UART_NUM_1, 1024, 8192, 0, NULL, 0));
 #endif
@@ -175,11 +176,11 @@ void app_main(void)
     s_packets = xQueueCreate(128, sizeof(gateway_packet_t));
     ESP_ERROR_CHECK(s_packets == NULL ? ESP_ERR_NO_MEM : ESP_OK);
     serial_start();
-    ESP_ERROR_CHECK(espnow_radio_start(CONFIG_GATEWAY_ESPNOW_CHANNEL, receive_packet));
+    ESP_ERROR_CHECK(espnow_radio_start(GATEWAY_ESPNOW_CHANNEL, receive_packet));
     uint8_t mac[6];
     ESP_ERROR_CHECK(esp_read_mac(mac, ESP_MAC_WIFI_STA));
     ESP_LOGI(TAG, "Gateway MAC=%02X:%02X:%02X:%02X:%02X:%02X, channel=%d",
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], CONFIG_GATEWAY_ESPNOW_CHANNEL);
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], GATEWAY_ESPNOW_CHANNEL);
     ESP_ERROR_CHECK(xTaskCreate(forward_to_host, "serial_tx", 4096, NULL, 7, NULL)
                     == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(xTaskCreate(forward_to_nodes, "serial_rx", 4096, NULL, 7, NULL)
