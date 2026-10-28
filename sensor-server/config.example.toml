@@ -2,6 +2,8 @@
 mode = "espnow" # "espnow" (gateway serial) or "udp" (direct Wi-Fi).
 # Used only in UDP mode.
 bind_address = "0.0.0.0:5000"
+# Local WebSocket API. Use 127.0.0.1 to restrict access to this machine.
+websocket_bind_address = "127.0.0.1:8765"
 stats_interval_secs = 1
 log_level = "info" # error, warn, info, debug, trace
 

@@ -9,6 +9,7 @@ use std::time::Duration;
 #[derive(Debug)]
 pub struct ServerConfig {
     pub transport: TransportConfig,
+    pub websocket_bind_address: SocketAddrV4,
     pub stats_interval: Duration,
     pub log_level: LogLevel,
     pub devices_by_mac: HashMap<MacAddress, String>,
@@ -55,6 +56,7 @@ struct RawServerConfig {
     #[serde(default)]
     log_level: LogLevel,
     bind_address: Option<String>,
+    websocket_bind_address: Option<String>,
     #[serde(default = "default_stats_interval_secs")]
     stats_interval_secs: u64,
 }
@@ -85,6 +87,13 @@ pub fn load(path: &Path) -> Result<ServerConfig, String> {
 }
 
 fn validate(raw: RawConfig) -> Result<ServerConfig, String> {
+    let websocket_bind_address = parse_websocket_address(
+        raw.server
+            .websocket_bind_address
+            .as_deref()
+            .unwrap_or("127.0.0.1:8765"),
+    )?;
+
     let transport = match raw.server.mode {
         ServerMode::Espnow => {
             let gateway = raw
@@ -142,6 +151,7 @@ fn validate(raw: RawConfig) -> Result<ServerConfig, String> {
 
     Ok(ServerConfig {
         transport,
+        websocket_bind_address,
         stats_interval: Duration::from_secs(raw.server.stats_interval_secs),
         log_level: raw.server.log_level,
         devices_by_mac,
@@ -155,6 +165,18 @@ fn parse_udp_address(value: &str) -> Result<SocketAddrV4, String> {
     {
         SocketAddr::V4(address) if address.port() != 0 => Ok(address),
         _ => Err("server.bind_address must be IPv4 with a nonzero UDP port".to_owned()),
+    }
+}
+
+fn parse_websocket_address(value: &str) -> Result<SocketAddrV4, String> {
+    match value
+        .parse::<SocketAddr>()
+        .map_err(|error| format!("invalid server.websocket_bind_address: {error}"))?
+    {
+        SocketAddr::V4(address) if address.port() != 0 => Ok(address),
+        _ => {
+            Err("server.websocket_bind_address must be IPv4 ip:port with a nonzero port".to_owned())
+        }
     }
 }
 
@@ -172,10 +194,12 @@ mod tests {
 
     #[test]
     fn legacy_udp_config_remains_supported() {
-        assert!(matches!(
-            parse("bind_address = '0.0.0.0:5000'").unwrap().transport,
-            TransportConfig::Udp(_)
-        ));
+        let config = parse("bind_address = '0.0.0.0:5000'").unwrap();
+        assert!(matches!(config.transport, TransportConfig::Udp(_)));
+        assert_eq!(
+            config.websocket_bind_address,
+            "127.0.0.1:8765".parse::<SocketAddrV4>().unwrap()
+        );
     }
 
     #[test]

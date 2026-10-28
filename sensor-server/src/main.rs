@@ -3,6 +3,7 @@ mod protocol;
 mod serial_frame;
 mod state;
 mod transport;
+mod websocket;
 
 use crate::config::{LogLevel, ServerConfig};
 use crate::protocol::{
@@ -12,6 +13,7 @@ use crate::state::{
     DeviceRegistry, DeviceState, ServerMetrics, format_rate, latency_percentiles_us,
 };
 use crate::transport::Transport;
+use crate::websocket::{WebSocketHub, start_from_registry};
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -135,6 +137,11 @@ fn run(
     info!("server started; press Ctrl+C to stop");
 
     let mut devices = DeviceRegistry::new(config.devices_by_mac, server_sync_token);
+    let websocket = start_from_registry(&devices, server_start, config.websocket_bind_address)?;
+    info!(
+        websocket_bind_address = %config.websocket_bind_address,
+        "local WebSocket API listening"
+    );
     let mut metrics = ServerMetrics::default();
     let mut interval_started = Instant::now();
     let mut dropped_log_lines = 0;
@@ -154,6 +161,7 @@ fn run(
                     &mut transport,
                     &mut devices,
                     &mut metrics,
+                    &websocket,
                 );
             }
             Ok(None) => {}
@@ -209,6 +217,7 @@ fn handle_datagram(
     transport: &mut Transport,
     devices: &mut DeviceRegistry,
     metrics: &mut ServerMetrics,
+    websocket: &WebSocketHub,
 ) {
     let datagram = match decode_datagram(packet) {
         Ok(datagram) => datagram,
@@ -230,6 +239,12 @@ fn handle_datagram(
             metrics.record_decoded();
             if devices.record(sample, received_at, server_now_us) {
                 metrics.record_mapped();
+                if let Some(name) = devices.name_for_id(sample.device_id)
+                    && let Some(latest) = devices.by_name.get(name).and_then(|state| state.latest)
+                    && latest.received_at == received_at
+                {
+                    websocket.publish(name, latest.sample.angle_degrees(), received_at);
+                }
             } else {
                 metrics.record_unknown(sample.device_id);
             }
@@ -412,9 +427,10 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
         let mut transport = Transport::Udp(socket);
-        let mut devices = DeviceRegistry::new(HashMap::from([(mac, "sensor_1".to_owned())]), 7);
-        let mut metrics = ServerMetrics::default();
         let start = Instant::now();
+        let mut devices = DeviceRegistry::new(HashMap::from([(mac, "sensor_1".to_owned())]), 7);
+        let websocket = WebSocketHub::new(["sensor_1".to_owned()], start);
+        let mut metrics = ServerMetrics::default();
         let mut registration = vec![0x49, 0x50, 3, 5];
         registration.extend(mac.octets());
         registration.extend(7_u32.to_be_bytes());
@@ -430,6 +446,7 @@ mod tests {
             &mut transport,
             &mut devices,
             &mut metrics,
+            &websocket,
         );
         let mut assigned = [0; 64];
         let assigned_size = client.recv(&mut assigned).unwrap();
@@ -453,6 +470,7 @@ mod tests {
             &mut transport,
             &mut devices,
             &mut metrics,
+            &websocket,
         );
         let mut response = [0; 64];
         let size = client.recv(&mut response).unwrap();
@@ -485,6 +503,7 @@ mod tests {
             &mut transport,
             &mut devices,
             &mut metrics,
+            &websocket,
         );
 
         // A gateway-framed sample reaches the same state/latency path as UDP.
@@ -509,6 +528,7 @@ mod tests {
             &mut transport,
             &mut devices,
             &mut metrics,
+            &websocket,
         );
         let state = &devices.by_name["sensor_1"];
         assert_eq!(state.received_total, 1);

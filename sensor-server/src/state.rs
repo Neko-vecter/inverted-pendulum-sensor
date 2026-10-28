@@ -302,6 +302,10 @@ impl DeviceRegistry {
         self.by_id.contains_key(&id)
     }
 
+    pub fn name_for_id(&self, id: u16) -> Option<&str> {
+        self.by_id.get(&id).map(String::as_str)
+    }
+
     pub fn begin_sync(
         &mut self,
         request: TimeSyncRequest,

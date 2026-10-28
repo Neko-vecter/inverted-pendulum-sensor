@@ -18,6 +18,7 @@ mode = "espnow"
 stats_interval_secs = 1
 log_level = "info" # error, warn, info, debug, trace
 bind_address = "0.0.0.0:5000" # Used only in UDP mode.
+websocket_bind_address = "127.0.0.1:8765" # Local sensor API; defaults to loopback.
 
 [gateway]
 serial = "/dev/ttyACM0" # Or a stable /dev/serial/by-id/... path, or "COM7".
@@ -30,6 +31,8 @@ baud_rate = 921600     # Optional; default 921600.
 ```
 
 In ESP-NOW mode, `[gateway] serial = "path"` is required; `bind_address` is optional and no UDP socket is opened. Use the OS serial device path or COM port identifier. The native USB gateway ignores the physical baud rate; an external UART adapter must match `gateway.baud_rate`. The port uses 8N1 and no flow control. Linux users need access to the serial device, commonly through the `dialout` group. If the port disconnects or becomes unreadable, the server exits with an error; reconnect and restart it.
+
+`server.websocket_bind_address` selects the WebSocket listen address in `IPv4:port` format. It defaults to `127.0.0.1:8765`. Use a specific local IPv4 address or `0.0.0.0` to allow connections through other interfaces; non-loopback addresses expose the API to those networks.
 
 In UDP mode, `server.bind_address` is required and `[gateway]` is unused. Use `0.0.0.0:5000` to listen on every IPv4 interface, or select a specific local IPv4 address. Device mappings always use the sensor station MAC printed by its firmware.
 
@@ -51,7 +54,7 @@ From this directory:
 cargo run --release -- --config config.toml
 ```
 
-The default config path is `config.toml`, so `cargo run --release` also works. The process prints one summary per configured device at the selected interval. Use `control + c` to stop it. The server has no control or data API yet; a future UDS interface is outside the current MVP scope.
+The default config path is `config.toml`, so `cargo run --release` also works. The process prints one summary per configured device at the selected interval. Use `control + c` to stop it. The WebSocket API is available at `ws://<websocket_bind_address>/ws`; by default this is `ws://127.0.0.1:8765/ws`. Clients subscribe to configured logical sensor names and receive a full snapshot followed by incremental updates. See [`../protocol/sensor-data.md`](../protocol/sensor-data.md) for the message contract.
 
 For UDP mode, allow incoming traffic on the configured port and configure each node with the server IPv4 address and port. For ESP-NOW mode, match the sensor and gateway radio channels (default 1), connect the gateway USB port, and keep other programs off that serial port.
 
