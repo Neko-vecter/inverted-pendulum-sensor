@@ -12,6 +12,9 @@ use tungstenite::handshake::server::{Request, Response};
 use tungstenite::{Message, WebSocket, accept_hdr};
 
 const CLIENT_QUEUE_CAPACITY: usize = 2048;
+const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(6);
 
 #[derive(Clone)]
 pub struct WebSocketHub {
@@ -26,6 +29,7 @@ struct Shared {
     state: Mutex<HubState>,
     control_sender: mpsc::Sender<ControlCommand>,
     control_receiver: Mutex<mpsc::Receiver<ControlCommand>>,
+    controller_id: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,11 +42,13 @@ struct HubState {
     sensor_names: BTreeSet<String>,
     latest: BTreeMap<String, SensorValue>,
     clients: HashMap<u64, Client>,
+    last_sensor_packet: Instant,
 }
 
 struct Client {
     sensors: BTreeSet<String>,
     sender: mpsc::SyncSender<HubUpdate>,
+    last_full_update: Instant,
 }
 
 #[derive(Clone)]
@@ -75,10 +81,12 @@ impl WebSocketHub {
                 next_client_id: AtomicU64::new(1),
                 control_sender,
                 control_receiver: Mutex::new(control_receiver),
+                controller_id: AtomicU64::new(0),
                 state: Mutex::new(HubState {
                     sensor_names: sensor_names.into_iter().collect(),
                     latest: BTreeMap::new(),
                     clients: HashMap::new(),
+                    last_sensor_packet: server_start,
                 }),
             }),
         }
@@ -90,6 +98,7 @@ impl WebSocketHub {
         };
         let value = SensorValue { angle, received_at };
         state.latest.insert(name.to_owned(), value.clone());
+        state.last_sensor_packet = received_at;
         let update = HubUpdate {
             sensors: vec![SensorUpdate {
                 name: name.to_owned(),
@@ -135,13 +144,19 @@ impl WebSocketHub {
         self.shared.measuring.load(Ordering::Acquire)
     }
 
-    pub fn publish_slow_update(&self) {
+    pub fn publish_stale_snapshot_if_due(&self, now: Instant) {
         let Ok(mut state) = self.shared.state.lock() else {
             return;
         };
-        let now = Instant::now();
+        if now.saturating_duration_since(state.last_sensor_packet) < SNAPSHOT_INTERVAL {
+            return;
+        }
         let latest = state.latest.clone();
         state.clients.retain(|_, client| {
+            if now.saturating_duration_since(client.last_full_update) < SNAPSHOT_INTERVAL {
+                return true;
+            }
+            client.last_full_update = now;
             let sensors = client
                 .sensors
                 .iter()
@@ -152,9 +167,6 @@ impl WebSocketHub {
                     })
                 })
                 .collect::<Vec<_>>();
-            if sensors.is_empty() {
-                return true;
-            }
             match client.sender.try_send(HubUpdate {
                 sensors,
                 timestamp: now,
@@ -204,102 +216,154 @@ impl WebSocketHub {
         }) else {
             return;
         };
-        let _ = socket
-            .get_ref()
-            .set_read_timeout(Some(Duration::from_millis(2)));
+        if socket.get_ref().set_nonblocking(true).is_err() {
+            return;
+        }
         let client_id = self.shared.next_client_id.fetch_add(1, Ordering::Relaxed);
         let mut subscription: Option<mpsc::Receiver<HubUpdate>> = None;
         let mut sequence = 0_u64;
+        let mut last_activity = Instant::now();
+        let mut ping_sent_at: Option<Instant> = None;
 
         loop {
+            let mut did_work = false;
             if let Some(receiver) = &subscription {
                 match receiver.try_recv() {
                     Ok(update) => {
                         if update.mode_generation
-                            != self.shared.mode_generation.load(Ordering::Acquire)
+                            == self.shared.mode_generation.load(Ordering::Acquire)
                         {
-                            continue;
-                        }
-                        sequence = sequence.wrapping_add(1);
-                        if send_update(&mut socket, sequence, update, &self.shared.timestamp_origin)
+                            sequence = sequence.wrapping_add(1);
+                            if send_update(
+                                &mut socket,
+                                sequence,
+                                update,
+                                &self.shared.timestamp_origin,
+                            )
                             .is_err()
-                        {
-                            break;
+                            {
+                                break;
+                            }
+                            did_work = true;
                         }
-                        continue;
                     }
                     Err(mpsc::TryRecvError::Disconnected) => break,
                     Err(mpsc::TryRecvError::Empty) => {}
                 }
             }
 
+            let now = Instant::now();
+            if ping_sent_at
+                .is_some_and(|sent| now.saturating_duration_since(sent) >= HEARTBEAT_TIMEOUT)
+            {
+                break;
+            }
+            if ping_sent_at.is_none()
+                && now.saturating_duration_since(last_activity) >= HEARTBEAT_INTERVAL
+            {
+                if socket.send(Message::Ping(Vec::new())).is_err() {
+                    break;
+                }
+                ping_sent_at = Some(now);
+            }
+
             match socket.read() {
-                Ok(Message::Text(text)) => match serde_json::from_str::<ControlRequest>(&text) {
-                    Ok(request) if request.message_type == "subscribe" => {
-                        match self.subscribe(client_id, request.sensors.as_deref().unwrap_or(&[])) {
-                            Ok((receiver, snapshot)) => {
-                                subscription = Some(receiver);
-                                sequence = sequence.wrapping_add(1);
-                                if send_update(
-                                    &mut socket,
-                                    sequence,
-                                    snapshot,
-                                    &self.shared.timestamp_origin,
-                                )
-                                .is_err()
-                                {
-                                    break;
+                Ok(Message::Text(text)) => {
+                    did_work = true;
+                    last_activity = Instant::now();
+                    match serde_json::from_str::<ControlRequest>(&text) {
+                        Ok(request) if request.message_type == "subscribe" => {
+                            did_work = true;
+                            match self
+                                .subscribe(client_id, request.sensors.as_deref().unwrap_or(&[]))
+                            {
+                                Ok((receiver, snapshot)) => {
+                                    subscription = Some(receiver);
+                                    sequence = sequence.wrapping_add(1);
+                                    if send_update(
+                                        &mut socket,
+                                        sequence,
+                                        snapshot,
+                                        &self.shared.timestamp_origin,
+                                    )
+                                    .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                                Err(message) => {
+                                    let error = json!({
+                                        "type": "error",
+                                        "code": "unknown_sensor",
+                                        "message": message,
+                                    });
+                                    if socket.send(Message::Text(error.to_string())).is_err() {
+                                        break;
+                                    }
                                 }
                             }
-                            Err(message) => {
-                                let error = json!({
-                                    "type": "error",
-                                    "code": "unknown_sensor",
-                                    "message": message,
-                                });
-                                if socket.send(Message::Text(error.to_string())).is_err() {
-                                    break;
-                                }
+                        }
+                        Ok(request) if request.message_type == "start" => {
+                            self.shared
+                                .controller_id
+                                .store(client_id, Ordering::Release);
+                            self.start_measurement();
+                            did_work = true;
+                            if send_control_ack(&mut socket, "started").is_err() {
+                                break;
+                            }
+                        }
+                        Ok(request) if request.message_type == "stop" => {
+                            self.shared
+                                .controller_id
+                                .store(client_id, Ordering::Release);
+                            self.stop_measurement();
+                            did_work = true;
+                            if send_control_ack(&mut socket, "stopped").is_err() {
+                                break;
+                            }
+                        }
+                        Ok(_) => {
+                            if send_error(
+                                &mut socket,
+                                "invalid_request",
+                                "type must be subscribe and sensors must be a non-empty array",
+                            )
+                            .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            if send_error(
+                                &mut socket,
+                                "invalid_json",
+                                "request must be a valid JSON object",
+                            )
+                            .is_err()
+                            {
+                                break;
                             }
                         }
                     }
-                    Ok(request) if request.message_type == "start" => {
-                        self.start_measurement();
-                        if send_control_ack(&mut socket, "started").is_err() {
-                            break;
-                        }
+                }
+                Ok(Message::Pong(_)) => {
+                    ping_sent_at = None;
+                    last_activity = Instant::now();
+                    did_work = true;
+                }
+                Ok(Message::Ping(_)) => {
+                    last_activity = Instant::now();
+                    if socket.flush().is_err() {
+                        break;
                     }
-                    Ok(request) if request.message_type == "stop" => {
-                        self.stop_measurement();
-                        if send_control_ack(&mut socket, "stopped").is_err() {
-                            break;
-                        }
-                    }
-                    Ok(_) => {
-                        if send_error(
-                            &mut socket,
-                            "invalid_request",
-                            "type must be subscribe and sensors must be a non-empty array",
-                        )
-                        .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(_) => {
-                        if send_error(
-                            &mut socket,
-                            "invalid_json",
-                            "request must be a valid JSON object",
-                        )
-                        .is_err()
-                        {
-                            break;
-                        }
-                    }
-                },
+                    did_work = true;
+                }
                 Ok(Message::Close(_)) => break,
-                Ok(_) => {}
+                Ok(_) => {
+                    last_activity = Instant::now();
+                    did_work = true;
+                }
                 Err(tungstenite::Error::Io(error))
                     if matches!(
                         error.kind(),
@@ -310,10 +374,22 @@ impl WebSocketHub {
                 }
                 Err(_) => break,
             }
+
+            if !did_work {
+                thread::sleep(Duration::from_millis(1));
+            }
         }
 
         if let Ok(mut state) = self.shared.state.lock() {
             state.clients.remove(&client_id);
+        }
+        if self
+            .shared
+            .controller_id
+            .compare_exchange(client_id, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.stop_measurement();
         }
     }
 
@@ -360,7 +436,14 @@ impl WebSocketHub {
             timestamp: now,
             mode_generation: self.shared.mode_generation.load(Ordering::Acquire),
         };
-        state.clients.insert(client_id, Client { sensors, sender });
+        state.clients.insert(
+            client_id,
+            Client {
+                sensors,
+                sender,
+                last_full_update: now,
+            },
+        );
         Ok((receiver, snapshot))
     }
 }

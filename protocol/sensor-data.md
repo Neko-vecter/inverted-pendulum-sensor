@@ -35,7 +35,7 @@ If a subscription includes an unconfigured sensor name, the server returns an er
 
 ## Measurement control
 
-The server starts in idle mode. Sensors remain registered and synchronized, sample and send one angle per second, and the server publishes a slow full angle update once per second. Send a control message on any WebSocket connection to change the global measurement mode:
+The server starts in idle mode. Sensors remain registered and synchronized, sample and send one angle per second. Send a control message on any WebSocket connection to change the global measurement mode:
 
 ```json
 {"type":"start"}
@@ -47,7 +47,11 @@ The server replies `{"type":"control","status":"started"}`, resets the API `time
 {"type":"stop"}
 ```
 
-The server replies `{"type":"control","status":"stopped"}` and commands every configured sensor back to one angle sample per second. Clock synchronization continues at 1 Hz, and slow full angle updates continue once per second. Stopping does not reset the API timestamp origin. The next `start` resets it again.
+The server replies `{"type":"control","status":"stopped"}` and commands every configured sensor back to one angle sample per second. Clock synchronization continues at 1 Hz. Stopping does not reset the API timestamp origin. The next `start` resets it again.
+
+If no sensor packet arrives for 100 ms, the server sends a full snapshot to subscribers at 10 Hz until sensor packets resume. This refreshes `age_us` and keeps clients synchronized when a sensor or transport is temporarily silent.
+
+The server sends WebSocket Ping frames periodically and expects Pong responses. If the client that most recently sent `start` or `stop` disconnects or stops responding, the server detects the lost control connection, sends `stop` to the sensors, and returns to idle mode.
 
 ## Update messages
 

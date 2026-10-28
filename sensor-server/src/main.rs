@@ -148,7 +148,6 @@ fn run(
     );
     let mut metrics = ServerMetrics::default();
     let mut interval_started = Instant::now();
-    let mut next_slow_update = Instant::now() + Duration::from_secs(1);
     let mut dropped_log_lines = 0;
 
     loop {
@@ -199,10 +198,7 @@ fn run(
         );
 
         let now = Instant::now();
-        if !websocket.is_measuring() && now >= next_slow_update {
-            websocket.publish_slow_update();
-            next_slow_update = now + Duration::from_secs(1);
-        }
+        websocket.publish_stale_snapshot_if_due(now);
         let elapsed = now.duration_since(interval_started);
         if elapsed >= config.stats_interval {
             log_stats(elapsed, now, &mut devices, &mut metrics);
