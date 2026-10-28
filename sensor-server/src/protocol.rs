@@ -7,6 +7,7 @@ pub const TIME_SYNC_RESPONSE_SIZE: usize = 26;
 pub const TIME_SYNC_REPORT_SIZE: usize = 22;
 pub const REGISTRATION_REQUEST_SIZE: usize = 14;
 pub const REGISTRATION_RESPONSE_SIZE: usize = 16;
+pub const SENSOR_CONTROL_SIZE: usize = 7;
 const MAGIC: u16 = 0x4950;
 const VERSION: u8 = 3;
 const TYPE_SAMPLE: u8 = 0x01;
@@ -15,6 +16,7 @@ const TYPE_TIME_SYNC_RESPONSE: u8 = 0x03;
 const TYPE_TIME_SYNC_REPORT: u8 = 0x04;
 const TYPE_REGISTRATION_REQUEST: u8 = 0x05;
 const TYPE_REGISTRATION_RESPONSE: u8 = 0x06;
+const TYPE_SENSOR_CONTROL: u8 = 0x07;
 const STATUS_ANGLE_VALID: u8 = 0x01;
 const STATUS_I2C_ERROR: u8 = 0x02;
 const MAX_ANGLE: u16 = 0x3FFF;
@@ -87,6 +89,11 @@ pub struct TimeSyncReport {
 pub struct RegistrationRequest {
     pub device_mac: MacAddress,
     pub sequence: u32,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SensorControl {
+    StartMeasurement,
+    StopMeasurement,
 }
 #[derive(Clone, Copy, Debug)]
 pub enum DecodedDatagram {
@@ -247,6 +254,16 @@ pub fn encode_registration_response(
     p[10..14].copy_from_slice(&r.sequence.to_be_bytes());
     p[14..16].copy_from_slice(&id.to_be_bytes());
     p
+}
+pub fn encode_sensor_control(device_id: u16, command: SensorControl) -> [u8; SENSOR_CONTROL_SIZE] {
+    let mut packet = [0; SENSOR_CONTROL_SIZE];
+    write_header(&mut packet, TYPE_SENSOR_CONTROL);
+    packet[4..6].copy_from_slice(&device_id.to_be_bytes());
+    packet[6] = match command {
+        SensorControl::StartMeasurement => 1,
+        SensorControl::StopMeasurement => 2,
+    };
+    packet
 }
 fn read_mac(b: &[u8]) -> MacAddress {
     MacAddress::from_octets(b.try_into().unwrap())

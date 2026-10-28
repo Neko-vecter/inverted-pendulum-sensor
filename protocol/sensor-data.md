@@ -33,6 +33,22 @@ If a subscription includes an unconfigured sensor name, the server returns an er
 
 ```
 
+## Measurement control
+
+The server starts in idle mode. Sensors remain registered and synchronized, sample and send one angle per second, and the server publishes a slow full angle update once per second. Send a control message on any WebSocket connection to change the global measurement mode:
+
+```json
+{"type":"start"}
+```
+
+The server replies `{"type":"control","status":"started"}`, resets the API `timestamp_us` origin, and commands every configured sensor to sample at the 1,000 Hz target. High-rate incremental angle updates then resume.
+
+```json
+{"type":"stop"}
+```
+
+The server replies `{"type":"control","status":"stopped"}` and commands every configured sensor back to one angle sample per second. Clock synchronization continues at 1 Hz, and slow full angle updates continue once per second. Stopping does not reset the API timestamp origin. The next `start` resets it again.
+
 ## Update messages
 
 Full snapshots and incremental updates use the same structure. `event` is `"update"` for both the initial full snapshot and subsequent updates. The first update after a subscription is the full snapshot; later updates are incremental.
@@ -67,7 +83,7 @@ Full snapshots and incremental updates use the same structure. `event` is `"upda
 
 ## Errors
 
-If the request's `type` is missing or is not `"subscribe"`, `sensors` is missing or empty, or a sensor name is invalid, the server sends a JSON message with `type` set to `"error"`. The error message format is `{"type":"error","code":"<code>","message":"<description>"}`. The client can correct the request and send it again.
+If the request's `type` is missing or is not `"subscribe"`, `"start"`, or `"stop"`, `sensors` is missing or empty on a subscription, or a sensor name is invalid, the server sends a JSON message with `type` set to `"error"`. The error message format is `{"type":"error","code":"<code>","message":"<description>"}`. The client can correct the request and send it again.
 
 ## Transport reuse
 

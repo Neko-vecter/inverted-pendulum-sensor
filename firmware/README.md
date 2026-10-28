@@ -1,6 +1,6 @@
 # ESP32 MT6701 sensor firmware
 
-This PlatformIO project supports the Seeed Studio XIAO ESP32-C6, XIAO ESP32-C3, and XIAO ESP32-C5. It samples one MT6701 over I2C and sends one version 3 sample per 1 ms sampling tick over ESP-NOW by default, with optional Wi-Fi / UDP. V3 samples use a 32-bit wrapping microsecond counter and a compact sync token; all boards use the same firmware. At startup, each sensor registers its Wi-Fi station MAC and receives a server-assigned 2-byte ID. Later packets identify the node with that ID.
+This PlatformIO project supports the Seeed Studio XIAO ESP32-C6, XIAO ESP32-C3, and XIAO ESP32-C5. It samples one MT6701 over I2C and sends V3 samples over ESP-NOW by default, with optional Wi-Fi / UDP. At boot, each sensor is idle and samples at 1 Hz while continuing clock synchronization. Server `start` and `stop` commands switch between 1 kHz active sampling and 1 Hz idle sampling. V3 samples use a 32-bit wrapping microsecond counter and a compact sync token; all boards use the same firmware. At startup, each sensor registers its Wi-Fi station MAC and receives a server-assigned 2-byte ID. Later packets identify the node with that ID.
 
 ## Wiring
 
@@ -59,11 +59,11 @@ The firmware logs its station MAC. Map this MAC to a logical name in the server 
 
 ## Implementation notes
 
-- The high-resolution timer notifies the sampling task every 1,000 us. Acquisition reads MT6701 registers `0x03` and `0x04` over I2C.
+- The high-resolution timer notifies the sampling task at 1 Hz while idle and every 1,000 us during active measurement. Acquisition reads MT6701 registers `0x03` and `0x04` over I2C.
 - A bounded queue separates acquisition from transmission. Sequence gaps expose missed timer slots, queue overflow and radio/network losses.
-- ESP-NOW sends are submitted immediately without waiting for the previous send callback; driver submission failures are counted. Receive callbacks only copy registration and sync replies to a bounded queue; they never block.
+- ESP-NOW sends are submitted immediately without waiting for the previous send callback; driver submission failures are counted. Receive callbacks only copy registration, sync replies, and measurement commands to a bounded queue; they never block.
 - V3 sensors register at startup with their station MAC and receive a server-assigned 2-byte ID in the range `0x0000` through `0x00FF`. Samples are 20 bytes; time-sync requests, responses and reports are 14, 26 and 22 bytes. Subsequent packets carry only the assigned ID. The sensor returns `t4` in the completion report; the server computes and stores the offset and RTT. ESP-NOW responses travel through the gateway serial port.
-- Sampling targets 1 kHz. Delivered rates depend on radio contention, I2C and serial throughput; broadcast submission does not acknowledge remote reception and samples are not retransmitted.
+- Active sampling targets 1 kHz; idle sampling targets 1 Hz. Delivered rates depend on radio contention, I2C and serial throughput; broadcast submission does not acknowledge remote reception and samples are not retransmitted.
 - Five-second logs report sampling, queue drops, offline reads, transport submission failures and clock sync. ESP-NOW considers the radio ready after initialization even if no gateway is present.
 - The timestamp precedes the MT6701 I2C read; latency does not subtract the sensor's internal measurement delay.
 

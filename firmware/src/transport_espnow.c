@@ -21,7 +21,8 @@ static void receive_packet(const esp_now_recv_info_t *info, const uint8_t *data,
     if (info == NULL || data == NULL || length < 4 || length > SENSOR_PROTOCOL_SYNC_RESPONSE_SIZE ||
         data[0] != 0x49 || data[1] != 0x50 || data[2] != SENSOR_PROTOCOL_VERSION ||
         !((data[3] == SENSOR_PROTOCOL_TYPE_TIME_SYNC_RESPONSE && length == SENSOR_PROTOCOL_SYNC_RESPONSE_SIZE) ||
-          (data[3] == SENSOR_PROTOCOL_TYPE_REGISTRATION_RESPONSE && length == SENSOR_PROTOCOL_REGISTRATION_RESPONSE_SIZE))) {
+          (data[3] == SENSOR_PROTOCOL_TYPE_REGISTRATION_RESPONSE && length == SENSOR_PROTOCOL_REGISTRATION_RESPONSE_SIZE) ||
+          (data[3] == SENSOR_PROTOCOL_TYPE_SENSOR_CONTROL && length == SENSOR_PROTOCOL_SENSOR_CONTROL_SIZE))) {
         return;
     }
     sync_packet_t response = {.length = (size_t)length, .received_us = (uint32_t)esp_timer_get_time()};

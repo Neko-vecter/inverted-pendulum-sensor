@@ -17,6 +17,7 @@
 #include "sensor_transport.h"
 
 #define SAMPLE_PERIOD_US 1000U
+#define IDLE_SAMPLE_PERIOD_US 1000000U
 #define SAMPLE_STATS_INTERVAL_US 5000000U
 #define CLOCK_SYNC_INTERVAL_US 1000000U
 #define REGISTRATION_RETRY_US 1000000U
@@ -35,10 +36,12 @@ static const char *TAG = "pendulum_sensor";
 static QueueHandle_t s_sample_queue;
 static TaskHandle_t s_sample_task;
 static esp_timer_handle_t s_sample_timer;
+static bool s_sample_timer_running;
 static i2c_master_bus_handle_t s_i2c_bus;
 static i2c_master_dev_handle_t s_mt6701;
 static uint8_t s_station_mac[6];
 static bool s_network_enabled;
+static bool s_measuring;
 
 typedef struct {
     bool assigned;
@@ -72,6 +75,24 @@ static uint32_t monotonic_counter_us(void)
     return (uint32_t)esp_timer_get_time();
 }
 
+static void set_measurement_mode(bool measuring)
+{
+    if (s_measuring == measuring) {
+        return;
+    }
+    s_measuring = measuring;
+    (void)xQueueReset(s_sample_queue);
+    (void)ulTaskNotifyTake(pdTRUE, 0);
+    if (!s_sample_timer_running) {
+        return;
+    }
+    ESP_ERROR_CHECK(esp_timer_stop(s_sample_timer));
+    const uint64_t period_us = measuring ? SAMPLE_PERIOD_US : IDLE_SAMPLE_PERIOD_US;
+    ESP_ERROR_CHECK(esp_timer_start_periodic(s_sample_timer, period_us));
+    ESP_LOGI(TAG, "Measurement %s; sampling period=%" PRIu64 " us",
+             measuring ? "started" : "stopped", period_us);
+}
+
 static bool counter_deadline_reached(uint32_t now_us, uint32_t deadline_us)
 {
     return (uint32_t)(now_us - deadline_us) < COUNTER_HALF_RANGE_US;
@@ -87,6 +108,14 @@ static uint32_t process_time_sync_responses(uint32_t *sync_errors_in_interval)
                                                                &device_t4_us);
         if (packet_length == 0) {
             break;
+        }
+
+        sensor_control_command_t control = {0};
+        if (sensor_protocol_decode_sensor_control(packet, packet_length, &control)) {
+            if (s_registration.assigned && control.device_id == s_registration.device_id) {
+                set_measurement_mode(control.command == SENSOR_CONTROL_START_MEASUREMENT);
+            }
+            continue;
         }
 
         sensor_registration_response_t registration = {0};
@@ -377,15 +406,6 @@ void app_main(void)
         err = sensor_transport_start();
         if (err == ESP_OK) {
             s_network_enabled = true;
-            if (xTaskCreate(sender_task,
-                            "sensor_sender",
-                            SENDER_TASK_STACK_SIZE,
-                            NULL,
-                            SENDER_TASK_PRIORITY,
-                            NULL) != pdPASS) {
-                ESP_LOGE(TAG, "Could not create sender task");
-                s_network_enabled = false;
-            }
         } else {
             ESP_LOGW(TAG, "Network is disabled: %s", esp_err_to_name(err));
         }
@@ -408,9 +428,22 @@ void app_main(void)
         .name = "sensor_1khz",
     };
     ESP_ERROR_CHECK(esp_timer_create(&timer_args, &s_sample_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(s_sample_timer, SAMPLE_PERIOD_US));
-    ESP_LOGI(TAG, "Sampling started: %u Hz target; I2C SDA=%d SCL=%d",
-             1000000U / SAMPLE_PERIOD_US,
+    const uint64_t initial_period_us = s_measuring ? SAMPLE_PERIOD_US : IDLE_SAMPLE_PERIOD_US;
+    ESP_ERROR_CHECK(esp_timer_start_periodic(s_sample_timer, initial_period_us));
+    s_sample_timer_running = true;
+    ESP_LOGI(TAG, "Initial sampling rate: %" PRIu64 " Hz; I2C SDA=%d SCL=%d",
+             1000000ULL / initial_period_us,
              SENSOR_I2C_SDA_GPIO,
              SENSOR_I2C_SCL_GPIO);
+
+    if (s_network_enabled &&
+        xTaskCreate(sender_task,
+                    "sensor_sender",
+                    SENDER_TASK_STACK_SIZE,
+                    NULL,
+                    SENDER_TASK_PRIORITY,
+                    NULL) != pdPASS) {
+        ESP_LOGE(TAG, "Could not create sender task");
+        s_network_enabled = false;
+    }
 }

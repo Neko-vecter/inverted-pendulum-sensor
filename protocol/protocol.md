@@ -9,9 +9,11 @@ This document defines the only supported wire protocol between ESP32 sensor node
 | Default transport | ESP-NOW to gateway, then framed serial |
 | Optional transport | Wi-Fi / UDP over IPv4 |
 | ESP-NOW channel | 1 by default; sensor and gateway must match |
-| Sample target | 1,000 packets/s per node |
+| Active sample target | 1,000 packets/s per node |
+| Idle sample target | 1 packet/s per node; clock synchronization remains at 1 Hz |
 | Registration request / response | 14 / 16 bytes |
 | Sample packet | 20 bytes |
+| Measurement control command | 7 bytes |
 | Sync request | 14 bytes |
 | Sync response | 26 bytes |
 | Sync completion report | 22 bytes |
@@ -40,7 +42,7 @@ Every packet begins with this four-byte header:
 | ---: | ---: | --- | --- |
 | 0 | 2 | magic | Unsigned 16-bit big-endian, `0x4950` |
 | 2 | 1 | version | `3` |
-| 3 | 1 | packet_type | Sample `0x01`, sync request `0x02`, sync response `0x03`, sync completion report `0x04`, registration request `0x05`, registration response `0x06` |
+| 3 | 1 | packet_type | Sample `0x01`, sync request `0x02`, sync response `0x03`, sync completion report `0x04`, registration request `0x05`, registration response `0x06`, measurement control `0x07` |
 
 Unknown magic, versions, packet types, or packet lengths are rejected. No V2 compatibility path is supported. Device IDs are encoded as unsigned 16-bit values and are restricted to `0x0000` through `0x00FF`.
 
@@ -165,6 +167,20 @@ latency_us = (server_receive_us - mapped_sample_us) mod 2^32
 
 The server reports P50, P75, P90, and P99 per configured device and statistics interval using nearest-rank percentiles. It retains at most 50,000 latency samples per device per interval; larger intervals use a bounded reservoir sample.
 
+## Measurement control
+
+The server sends a measurement control command to each configured device in response to the WebSocket `start` and `stop` controls documented in [`sensor-data.md`](sensor-data.md). A new sensor starts in idle mode: it samples and sends one angle per second while continuing the one-hertz clock synchronization exchange. `start` switches sampling and sample transmission to the 1,000 Hz target. `stop` returns the sensor to one angle sample per second and leaves clock synchronization enabled.
+
+### Command: server to sensor
+
+| Offset | Length | Field | Encoding |
+| ---: | ---: | --- | --- |
+| 0 | 4 | Header | Version 3, type `0x07` |
+| 4 | 2 | device_id | Assigned ID from startup registration |
+| 6 | 1 | command | Start measurement `0x01`; stop measurement and return to idle `0x02` |
+
+Total command length is **7 bytes**. In ESP-NOW mode, the gateway broadcasts each command and each sensor applies only commands addressed to its assigned device ID. In UDP mode, the server sends the command to that sensor's most recently observed UDP address.
+
 ## Scope
 
-The protocol includes startup registration and assignment of a device ID, sensor samples, and clock synchronization. It has no general remote configuration or start/stop commands.
+The protocol includes startup registration and assignment of a device ID, sensor samples, clock synchronization, and start/stop measurement commands. It does not provide general remote configuration.

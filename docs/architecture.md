@@ -2,7 +2,7 @@
 
 ## System Overview
 
-The system consists of ESP32 sensor nodes, each connected to an MT6701 magnetic angle sensor and targeting 1000 samples per second. ESP-NOW is the default transport. An ESP32-C6 gateway forwards packets over native USB serial to the Rust Sensor Server. Wi-Fi / UDP remains selectable in sensor sdkconfig and server configuration.
+The system consists of ESP32 sensor nodes, each connected to an MT6701 magnetic angle sensor. Nodes sample at 1 Hz while idle and target 1000 samples per second during active measurement. ESP-NOW is the default transport. An ESP32-C6 gateway forwards packets over native USB serial to the Rust Sensor Server. Wi-Fi / UDP remains selectable in sensor sdkconfig and server configuration.
 
 ```mermaid
 flowchart LR
@@ -26,7 +26,7 @@ Each supported sensor board runs the same firmware. Its station MAC is used for 
 ```mermaid
 flowchart TD
     Sensor["MT6701 Sensor"] --> Driver["I2C Sensor Driver"]
-    Driver --> Sampler["1 kHz Sampling Task"]
+    Driver --> Sampler["1 Hz idle / 1 kHz active sampling"]
     Sampler --> Queue["Bounded Sample Queue"]
     Queue --> Encoder["Version 3 Packet Encoder"]
     Encoder --> Select{"Transport selected in sdkconfig"}
@@ -40,12 +40,12 @@ flowchart TD
 ### Responsibilities
 
 - **Sensor driver:** Reads the raw 14-bit angle value from the MT6701 over I2C.
-- **Sampling task:** Uses a 1 ms high-resolution timer to target 1000 samples per second.
+- **Sampling task:** Uses a high-resolution timer for 1 Hz idle angle updates and switches to a 1 ms period for 1000 samples per second after a server start command.
 - **Sample queue:** Decouples sensor reads from transport submission. Samples can be dropped when the bounded queue fills or the selected transport is unavailable.
 - **Packet encoder:** Encodes samples and clock-sync messages using the version 3 contract in [`protocol/protocol.md`](../protocol/protocol.md). Samples carry a compact session token; clock metadata is sent only in low-rate sync exchanges.
 - **ESP-NOW transport:** Sends broadcasts on the configured channel and queues matching sync responses from the gateway. It needs the Wi-Fi radio driver, but does not start an access point connection, IP stack, or UDP application code.
 - **Optional UDP transport:** Connects to a configured access point, reconnects after disconnects, and sends packets to the configured server address.
-- **Clock-sync client:** Exchanges monotonic timestamps about once per second and reports the response receive timestamp to the server. The server retains the clock offset and round-trip time per device.
+- **Clock-sync client:** Exchanges monotonic timestamps about once per second in both idle and active modes and reports the response receive timestamp to the server. The server retains the clock offset and round-trip time per device.
 
 ## ESP-NOW Gateway Architecture
 
@@ -125,7 +125,7 @@ flowchart TD
 | Optional transport       | Wi-Fi / UDP over IPv4 |
 | UDP listen port          | 5000 (default, UDP mode) |
 | ESP-NOW channel          | 1 (default; must match the gateway) |
-| Sampling rate            | 1000 Hz per node (target) |
+| Sampling rate            | 1 Hz idle; 1000 Hz active target per node |
 | Transmission mode        | One packet per sample |
 | Packet size              | 20-byte version 3 sample |
 | Byte order               | Big endian |
@@ -146,7 +146,7 @@ All nodes use the same firmware. On startup each registers its Wi-Fi station MAC
 ### Included
 
 - MT6701 raw angle acquisition.
-- 1000 Hz target sampling rate per node.
+- 1 Hz idle angle updates and 1000 Hz active sampling target per node.
 - ESP-NOW sample and clock-sync transmission through a serial gateway by default.
 - Optional Wi-Fi connectivity, automatic reconnection, and UDP packet transmission.
 - Rust UDP and framed-serial packet reception and validation.
@@ -154,11 +154,11 @@ All nodes use the same firmware. On startup each registers its Wi-Fi station MAC
 - Independent state management for three sensor nodes.
 - Packet reception statistics and sequence-based loss detection.
 - Device-to-server clock synchronization and per-device P50/P75/P90/P99 latency estimates.
+- WebSocket start/stop controls that switch sensor nodes between idle and active sampling.
 
 ### Excluded
 
 - Remote device configuration.
-- Remote start/stop commands.
 - Hardware-level clock synchronization guarantees or a hard real-time latency guarantee.
 - Historical data storage.
 - Motor control algorithms.
@@ -182,4 +182,4 @@ flowchart LR
 
 The separation ensures that sensor acquisition and motion control can evolve independently.
 
-**MVP Acceptance Criteria:** The Rust Sensor Server can continuously receive raw angle measurements from three physical ESP32-C6 nodes, each targeting 1000 samples per second, while reporting per-device reception rates, packet loss, and synchronized sample-to-receive latency percentiles.
+**MVP Acceptance Criteria:** The Rust Sensor Server can receive synchronized 1 Hz idle angles and switch three physical ESP32-C6 nodes to a 1000 samples per second active target, while reporting per-device reception rates, packet loss, and synchronized sample-to-receive latency percentiles.

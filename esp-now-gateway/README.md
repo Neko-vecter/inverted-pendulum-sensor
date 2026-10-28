@@ -18,6 +18,7 @@ channel configured on every sensor and the server.
 
 - `GATEWAY_SERIAL_USB 1` uses native USB Serial/JTAG, the default: connect the XIAO USB port to the server. Linux usually exposes `/dev/ttyACM0`; prefer a stable `/dev/serial/by-id/...` path. Windows uses a COM port. The baud setting does not limit native USB throughput.
 - `GATEWAY_SERIAL_USB 0` uses UART1: use an external 3.3 V USB-UART adapter, common ground, gateway TX GPIO16 to adapter RX, gateway RX GPIO17 to adapter TX. Pins and speed are configurable through `GATEWAY_UART_TX_GPIO`, `GATEWAY_UART_RX_GPIO`, and `GATEWAY_UART_BAUD`; default speed is 921600 baud, 8N1, no flow control. Three nodes at 1 kHz bring the default UART close to its practical limit; native USB is recommended for more headroom.
+- The gateway forwards V3 measurement start/stop commands from the server to the sensor nodes along with registration and clock-sync responses.
 
 The native USB port carries binary data. Keep the primary console on UART0 and disable the secondary USB console, as specified in `sdkconfig.defaults`. An existing generated sdkconfig overrides these ESP-IDF defaults; use `pio run -e seeed_xiao_esp32c6 -t menuconfig` to change console settings if needed. A build guard prevents USB console output from corrupting data. Logs and five-second forwarding/error counters are available on UART0 at 115200 baud. Do not open a serial monitor on the data port while the server is using it.
 

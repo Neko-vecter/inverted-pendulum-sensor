@@ -7,13 +7,15 @@ mod websocket;
 
 use crate::config::{LogLevel, ServerConfig};
 use crate::protocol::{
-    DecodedDatagram, decode_datagram, encode_registration_response, encode_time_sync_response,
+    DecodedDatagram, SensorControl, decode_datagram, encode_registration_response,
+    encode_sensor_control, encode_time_sync_response,
 };
 use crate::state::{
     DeviceRegistry, DeviceState, ServerMetrics, format_rate, latency_percentiles_us,
 };
 use crate::transport::Transport;
-use crate::websocket::{WebSocketHub, start_from_registry};
+use crate::websocket::{ControlCommand, WebSocketHub, start_from_registry};
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -138,12 +140,15 @@ fn run(
 
     let mut devices = DeviceRegistry::new(config.devices_by_mac, server_sync_token);
     let websocket = start_from_registry(&devices, server_start, config.websocket_bind_address)?;
+    let mut sensor_peers = HashMap::new();
+    let mut initialized_measurement_modes = HashSet::new();
     info!(
         websocket_bind_address = %config.websocket_bind_address,
         "local WebSocket API listening"
     );
     let mut metrics = ServerMetrics::default();
     let mut interval_started = Instant::now();
+    let mut next_slow_update = Instant::now() + Duration::from_secs(1);
     let mut dropped_log_lines = 0;
 
     loop {
@@ -162,6 +167,8 @@ fn run(
                     &mut devices,
                     &mut metrics,
                     &websocket,
+                    &mut sensor_peers,
+                    &mut initialized_measurement_modes,
                 );
             }
             Ok(None) => {}
@@ -183,7 +190,19 @@ fn run(
             }
         }
 
+        process_control_commands(
+            &websocket,
+            &mut transport,
+            &devices,
+            &sensor_peers,
+            &mut initialized_measurement_modes,
+        );
+
         let now = Instant::now();
+        if !websocket.is_measuring() && now >= next_slow_update {
+            websocket.publish_slow_update();
+            next_slow_update = now + Duration::from_secs(1);
+        }
         let elapsed = now.duration_since(interval_started);
         if elapsed >= config.stats_interval {
             log_stats(elapsed, now, &mut devices, &mut metrics);
@@ -218,6 +237,8 @@ fn handle_datagram(
     devices: &mut DeviceRegistry,
     metrics: &mut ServerMetrics,
     websocket: &WebSocketHub,
+    sensor_peers: &mut HashMap<u16, SocketAddr>,
+    initialized_measurement_modes: &mut HashSet<u16>,
 ) {
     let datagram = match decode_datagram(packet) {
         Ok(datagram) => datagram,
@@ -239,6 +260,19 @@ fn handle_datagram(
             metrics.record_decoded();
             if devices.record(sample, received_at, server_now_us) {
                 metrics.record_mapped();
+                if let Some(sender) = sender {
+                    sensor_peers.insert(sample.device_id, sender);
+                }
+                if !initialized_measurement_modes.contains(&sample.device_id)
+                    && send_sensor_control(
+                        sample.device_id,
+                        websocket.is_measuring(),
+                        transport,
+                        sensor_peers,
+                    )
+                {
+                    initialized_measurement_modes.insert(sample.device_id);
+                }
                 if let Some(name) = devices.name_for_id(sample.device_id)
                     && let Some(latest) = devices.by_name.get(name).and_then(|state| state.latest)
                     && latest.received_at == received_at
@@ -254,15 +288,24 @@ fn handle_datagram(
                 debug!(sensor_mac = %request.device_mac, "registration request from unconfigured sensor");
                 return;
             };
+            if let Some(sender) = sender {
+                sensor_peers.insert(device_id, sender);
+            }
             debug!(sensor_mac = %request.device_mac, device_id, "sensor registration requested");
             let response = encode_registration_response(request, device_id);
             if let Err(error) = transport.respond(&response, sender) {
                 warn!(%error, "registration response failed");
             }
+            if send_sensor_control(device_id, websocket.is_measuring(), transport, sensor_peers) {
+                initialized_measurement_modes.insert(device_id);
+            }
         }
         DecodedDatagram::TimeSyncRequest(request) => {
             if !devices.contains_id(request.device_id) {
                 return;
+            }
+            if let Some(sender) = sender {
+                sensor_peers.insert(request.device_id, sender);
             }
             let server_t3_us = monotonic_us(server_start, Instant::now()) as u32;
             devices.begin_sync(request, server_now_us, server_t3_us);
@@ -274,6 +317,55 @@ fn handle_datagram(
         }
         DecodedDatagram::TimeSyncReport(report) => {
             let _ = devices.complete_sync(report);
+            if let Some(sender) = sender {
+                sensor_peers.insert(report.device_id, sender);
+            }
+        }
+    }
+}
+
+fn process_control_commands(
+    websocket: &WebSocketHub,
+    transport: &mut Transport,
+    devices: &DeviceRegistry,
+    sensor_peers: &HashMap<u16, SocketAddr>,
+    initialized_measurement_modes: &mut HashSet<u16>,
+) {
+    while let Some(command) = websocket.try_next_control() {
+        let command = match command {
+            ControlCommand::Start => SensorControl::StartMeasurement,
+            ControlCommand::Stop => SensorControl::StopMeasurement,
+        };
+        for device in devices.by_name.values() {
+            let measuring = command == SensorControl::StartMeasurement;
+            if send_sensor_control(device.device_id, measuring, transport, sensor_peers) {
+                initialized_measurement_modes.insert(device.device_id);
+            }
+        }
+    }
+}
+
+fn send_sensor_control(
+    device_id: u16,
+    measuring: bool,
+    transport: &mut Transport,
+    sensor_peers: &HashMap<u16, SocketAddr>,
+) -> bool {
+    let peer = sensor_peers.get(&device_id).copied();
+    if matches!(transport, Transport::Udp(_)) && peer.is_none() {
+        return false;
+    }
+    let command = if measuring {
+        SensorControl::StartMeasurement
+    } else {
+        SensorControl::StopMeasurement
+    };
+    let packet = encode_sensor_control(device_id, command);
+    match transport.respond(&packet, peer) {
+        Ok(()) => true,
+        Err(error) => {
+            warn!(device_id, %error, "sensor measurement control failed");
+            false
         }
     }
 }
@@ -430,6 +522,8 @@ mod tests {
         let start = Instant::now();
         let mut devices = DeviceRegistry::new(HashMap::from([(mac, "sensor_1".to_owned())]), 7);
         let websocket = WebSocketHub::new(["sensor_1".to_owned()], start);
+        let mut sensor_peers = HashMap::new();
+        let mut initialized_measurement_modes = HashSet::new();
         let mut metrics = ServerMetrics::default();
         let mut registration = vec![0x49, 0x50, 3, 5];
         registration.extend(mac.octets());
@@ -447,6 +541,8 @@ mod tests {
             &mut devices,
             &mut metrics,
             &websocket,
+            &mut sensor_peers,
+            &mut initialized_measurement_modes,
         );
         let mut assigned = [0; 64];
         let assigned_size = client.recv(&mut assigned).unwrap();
@@ -471,6 +567,8 @@ mod tests {
             &mut devices,
             &mut metrics,
             &websocket,
+            &mut sensor_peers,
+            &mut initialized_measurement_modes,
         );
         let mut response = [0; 64];
         let size = client.recv(&mut response).unwrap();
@@ -504,6 +602,8 @@ mod tests {
             &mut devices,
             &mut metrics,
             &websocket,
+            &mut sensor_peers,
+            &mut initialized_measurement_modes,
         );
 
         // A gateway-framed sample reaches the same state/latency path as UDP.
@@ -529,6 +629,8 @@ mod tests {
             &mut devices,
             &mut metrics,
             &websocket,
+            &mut sensor_peers,
+            &mut initialized_measurement_modes,
         );
         let state = &devices.by_name["sensor_1"];
         assert_eq!(state.received_total, 1);

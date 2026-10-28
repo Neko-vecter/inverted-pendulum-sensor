@@ -19,9 +19,19 @@ pub struct WebSocketHub {
 }
 
 struct Shared {
-    server_start: Instant,
+    timestamp_origin: Mutex<Instant>,
+    measuring: std::sync::atomic::AtomicBool,
+    mode_generation: AtomicU64,
     next_client_id: AtomicU64,
     state: Mutex<HubState>,
+    control_sender: mpsc::Sender<ControlCommand>,
+    control_receiver: Mutex<mpsc::Receiver<ControlCommand>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlCommand {
+    Start,
+    Stop,
 }
 
 struct HubState {
@@ -51,14 +61,20 @@ struct SensorUpdate {
 struct HubUpdate {
     sensors: Vec<SensorUpdate>,
     timestamp: Instant,
+    mode_generation: u64,
 }
 
 impl WebSocketHub {
     pub fn new(sensor_names: impl IntoIterator<Item = String>, server_start: Instant) -> Self {
+        let (control_sender, control_receiver) = mpsc::channel();
         Self {
             shared: Arc::new(Shared {
-                server_start,
+                timestamp_origin: Mutex::new(server_start),
+                measuring: std::sync::atomic::AtomicBool::new(false),
+                mode_generation: AtomicU64::new(0),
                 next_client_id: AtomicU64::new(1),
+                control_sender,
+                control_receiver: Mutex::new(control_receiver),
                 state: Mutex::new(HubState {
                     sensor_names: sensor_names.into_iter().collect(),
                     latest: BTreeMap::new(),
@@ -80,12 +96,70 @@ impl WebSocketHub {
                 value,
             }],
             timestamp: received_at,
+            mode_generation: self.shared.mode_generation.load(Ordering::Acquire),
         };
+        if !self.is_measuring() {
+            return;
+        }
         state.clients.retain(|_, client| {
             if !client.sensors.contains(name) {
                 return true;
             }
             match client.sender.try_send(update.clone()) {
+                Ok(()) => true,
+                Err(mpsc::TrySendError::Full(_) | mpsc::TrySendError::Disconnected(_)) => false,
+            }
+        });
+    }
+
+    pub fn start_measurement(&self) {
+        if let Ok(mut origin) = self.shared.timestamp_origin.lock() {
+            *origin = Instant::now();
+            self.shared.mode_generation.fetch_add(1, Ordering::AcqRel);
+            self.shared.measuring.store(true, Ordering::Release);
+            let _ = self.shared.control_sender.send(ControlCommand::Start);
+        }
+    }
+
+    pub fn stop_measurement(&self) {
+        self.shared.measuring.store(false, Ordering::Release);
+        self.shared.mode_generation.fetch_add(1, Ordering::AcqRel);
+        let _ = self.shared.control_sender.send(ControlCommand::Stop);
+    }
+
+    pub fn try_next_control(&self) -> Option<ControlCommand> {
+        self.shared.control_receiver.lock().ok()?.try_recv().ok()
+    }
+
+    pub fn is_measuring(&self) -> bool {
+        self.shared.measuring.load(Ordering::Acquire)
+    }
+
+    pub fn publish_slow_update(&self) {
+        let Ok(mut state) = self.shared.state.lock() else {
+            return;
+        };
+        let now = Instant::now();
+        let latest = state.latest.clone();
+        state.clients.retain(|_, client| {
+            let sensors = client
+                .sensors
+                .iter()
+                .filter_map(|name| {
+                    latest.get(name).cloned().map(|value| SensorUpdate {
+                        name: name.clone(),
+                        value,
+                    })
+                })
+                .collect::<Vec<_>>();
+            if sensors.is_empty() {
+                return true;
+            }
+            match client.sender.try_send(HubUpdate {
+                sensors,
+                timestamp: now,
+                mode_generation: self.shared.mode_generation.load(Ordering::Acquire),
+            }) {
                 Ok(()) => true,
                 Err(mpsc::TrySendError::Full(_) | mpsc::TrySendError::Disconnected(_)) => false,
             }
@@ -141,8 +215,13 @@ impl WebSocketHub {
             if let Some(receiver) = &subscription {
                 match receiver.try_recv() {
                     Ok(update) => {
+                        if update.mode_generation
+                            != self.shared.mode_generation.load(Ordering::Acquire)
+                        {
+                            continue;
+                        }
                         sequence = sequence.wrapping_add(1);
-                        if send_update(&mut socket, sequence, update, self.shared.server_start)
+                        if send_update(&mut socket, sequence, update, &self.shared.timestamp_origin)
                             .is_err()
                         {
                             break;
@@ -155,9 +234,9 @@ impl WebSocketHub {
             }
 
             match socket.read() {
-                Ok(Message::Text(text)) => match serde_json::from_str::<SubscribeRequest>(&text) {
+                Ok(Message::Text(text)) => match serde_json::from_str::<ControlRequest>(&text) {
                     Ok(request) if request.message_type == "subscribe" => {
-                        match self.subscribe(client_id, &request.sensors) {
+                        match self.subscribe(client_id, request.sensors.as_deref().unwrap_or(&[])) {
                             Ok((receiver, snapshot)) => {
                                 subscription = Some(receiver);
                                 sequence = sequence.wrapping_add(1);
@@ -165,7 +244,7 @@ impl WebSocketHub {
                                     &mut socket,
                                     sequence,
                                     snapshot,
-                                    self.shared.server_start,
+                                    &self.shared.timestamp_origin,
                                 )
                                 .is_err()
                                 {
@@ -182,6 +261,18 @@ impl WebSocketHub {
                                     break;
                                 }
                             }
+                        }
+                    }
+                    Ok(request) if request.message_type == "start" => {
+                        self.start_measurement();
+                        if send_control_ack(&mut socket, "started").is_err() {
+                            break;
+                        }
+                    }
+                    Ok(request) if request.message_type == "stop" => {
+                        self.stop_measurement();
+                        if send_control_ack(&mut socket, "stopped").is_err() {
+                            break;
                         }
                     }
                     Ok(_) => {
@@ -267,6 +358,7 @@ impl WebSocketHub {
                 })
                 .collect(),
             timestamp: now,
+            mode_generation: self.shared.mode_generation.load(Ordering::Acquire),
         };
         state.clients.insert(client_id, Client { sensors, sender });
         Ok((receiver, snapshot))
@@ -274,17 +366,17 @@ impl WebSocketHub {
 }
 
 #[derive(Deserialize)]
-struct SubscribeRequest {
+struct ControlRequest {
     #[serde(rename = "type")]
     message_type: String,
-    sensors: Vec<String>,
+    sensors: Option<Vec<String>>,
 }
 
 fn send_update(
     socket: &mut WebSocket<TcpStream>,
     sequence: u64,
     update: HubUpdate,
-    server_start: Instant,
+    timestamp_origin: &Mutex<Instant>,
 ) -> Result<(), tungstenite::Error> {
     let now = Instant::now();
     let mut sensors = serde_json::Map::new();
@@ -297,9 +389,13 @@ fn send_update(
             }),
         );
     }
+    let origin = timestamp_origin
+        .lock()
+        .map(|origin| *origin)
+        .unwrap_or(update.timestamp);
     let timestamp_us = update
         .timestamp
-        .saturating_duration_since(server_start)
+        .saturating_duration_since(origin)
         .as_micros()
         .min(u128::from(u64::MAX)) as u64;
     let message = json!({
@@ -310,6 +406,15 @@ fn send_update(
         "sensor": Value::Object(sensors),
     });
     socket.send(Message::Text(message.to_string()))
+}
+
+fn send_control_ack(
+    socket: &mut WebSocket<TcpStream>,
+    status: &str,
+) -> Result<(), tungstenite::Error> {
+    socket.send(Message::Text(
+        json!({"type": "control", "status": status}).to_string(),
+    ))
 }
 
 fn send_error(

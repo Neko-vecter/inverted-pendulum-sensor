@@ -54,7 +54,7 @@ From this directory:
 cargo run --release -- --config config.toml
 ```
 
-The default config path is `config.toml`, so `cargo run --release` also works. The process prints one summary per configured device at the selected interval. Use `control + c` to stop it. The WebSocket API is available at `ws://<websocket_bind_address>/ws`; by default this is `ws://127.0.0.1:8765/ws`. Clients subscribe to configured logical sensor names and receive a full snapshot followed by incremental updates. See [`../protocol/sensor-data.md`](../protocol/sensor-data.md) for the message contract.
+The default config path is `config.toml`, so `cargo run --release` also works. The process prints one summary per configured device at the selected interval. Use `control + c` to stop it. The WebSocket API is available at `ws://<websocket_bind_address>/ws`; by default this is `ws://127.0.0.1:8765/ws`. Clients subscribe to configured logical sensor names and receive 1 Hz idle updates. Send `{"type":"start"}` to begin 1 kHz measurement updates or `{"type":"stop"}` to return sensors to 1 Hz idle sampling. See [`../protocol/sensor-data.md`](../protocol/sensor-data.md) for the message contract.
 
 For UDP mode, allow incoming traffic on the configured port and configure each node with the server IPv4 address and port. For ESP-NOW mode, match the sensor and gateway radio channels (default 1), connect the gateway USB port, and keep other programs off that serial port.
 
