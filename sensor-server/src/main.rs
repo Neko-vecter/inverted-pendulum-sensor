@@ -4,6 +4,7 @@ mod serial_frame;
 mod state;
 mod transport;
 
+use crate::config::{LogLevel, ServerConfig};
 use crate::protocol::{
     DecodedDatagram, decode_datagram, encode_registration_response, encode_time_sync_response,
 };
@@ -14,29 +15,69 @@ use crate::transport::Transport;
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::process;
+use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tracing::{debug, error, info, trace, warn};
 
-fn main() {
+fn main() -> ExitCode {
     let server_start = Instant::now();
     let config_path = match config_path_from_args() {
         Ok(Some(path)) => path,
         Ok(None) => {
             print_usage();
-            return;
+            return ExitCode::SUCCESS;
         }
         Err(error) => {
             eprintln!("error: {error}");
             print_usage();
-            process::exit(2);
+            return ExitCode::from(2);
         }
     };
 
-    if let Err(error) = run(&config_path, server_start) {
-        eprintln!("sensor-server: {error}");
-        process::exit(1);
+    let config = match config::load(&config_path) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("sensor-server: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let (_logging_guard, log_error_counter) = init_logging(config.log_level);
+
+    match run(config, server_start, log_error_counter) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            error!(%error, "server stopped");
+            ExitCode::FAILURE
+        }
     }
+}
+
+fn init_logging(
+    level: LogLevel,
+) -> (
+    tracing_appender::non_blocking::WorkerGuard,
+    tracing_appender::non_blocking::ErrorCounter,
+) {
+    let (writer, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+        .buffered_lines_limit(2048)
+        .lossy(true)
+        .finish(std::io::stderr());
+    let error_counter = writer.error_counter();
+    let max_level = match level {
+        LogLevel::Error => tracing_subscriber::filter::LevelFilter::ERROR,
+        LogLevel::Warn => tracing_subscriber::filter::LevelFilter::WARN,
+        LogLevel::Info => tracing_subscriber::filter::LevelFilter::INFO,
+        LogLevel::Debug => tracing_subscriber::filter::LevelFilter::DEBUG,
+        LogLevel::Trace => tracing_subscriber::filter::LevelFilter::TRACE,
+    };
+    tracing_subscriber::fmt()
+        .with_max_level(max_level)
+        .with_writer(writer)
+        .with_ansi(false)
+        .try_init()
+        .expect("failed to initialize logging subscriber");
+    (guard, error_counter)
 }
 
 fn config_path_from_args() -> Result<Option<PathBuf>, String> {
@@ -67,8 +108,11 @@ fn print_usage() {
     println!("Default config path: config.toml in the current directory");
 }
 
-fn run(config_path: &std::path::Path, server_start: Instant) -> Result<(), String> {
-    let config = config::load(config_path)?;
+fn run(
+    config: ServerConfig,
+    server_start: Instant,
+    log_error_counter: tracing_appender::non_blocking::ErrorCounter,
+) -> Result<(), String> {
     let session_entropy = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("system clock is before the Unix epoch: {error}"))?
@@ -76,17 +120,24 @@ fn run(config_path: &std::path::Path, server_start: Instant) -> Result<(), Strin
         .min(u128::from(u64::MAX)) as u64;
     let server_sync_token = ((session_entropy as u32) ^ ((session_entropy >> 32) as u32)).max(1);
     let mut transport = Transport::open(&config.transport)?;
-    println!(
+    info!(
         "protocol v3, {} configured device(s)",
         config.devices_by_mac.len()
     );
-    println!("time-sync token: {server_sync_token}");
-    println!("stats interval: {}s", config.stats_interval.as_secs());
-    println!("press Ctrl+C to stop");
+    info!(
+        time_sync_token = server_sync_token,
+        "time synchronization initialized"
+    );
+    info!(
+        stats_interval_secs = config.stats_interval.as_secs(),
+        "statistics interval configured"
+    );
+    info!("server started; press Ctrl+C to stop");
 
     let mut devices = DeviceRegistry::new(config.devices_by_mac, server_sync_token);
     let mut metrics = ServerMetrics::default();
     let mut interval_started = Instant::now();
+    let mut dropped_log_lines = 0;
 
     loop {
         match transport.receive() {
@@ -119,7 +170,7 @@ fn run(config_path: &std::path::Path, server_start: Instant) -> Result<(), Strin
                         "ESP-NOW serial receive failed: {error}; reconnect the gateway and restart"
                     ));
                 }
-                eprintln!("UDP receive error: {error}");
+                warn!(%error, "UDP receive error");
                 thread::sleep(Duration::from_millis(100));
             }
         }
@@ -127,11 +178,20 @@ fn run(config_path: &std::path::Path, server_start: Instant) -> Result<(), Strin
         let now = Instant::now();
         let elapsed = now.duration_since(interval_started);
         if elapsed >= config.stats_interval {
-            print_stats(elapsed, now, &mut devices, &mut metrics);
+            log_stats(elapsed, now, &mut devices, &mut metrics);
+            let total_dropped_log_lines = log_error_counter.dropped_lines();
+            if total_dropped_log_lines > dropped_log_lines {
+                warn!(
+                    dropped_log_lines = total_dropped_log_lines - dropped_log_lines,
+                    dropped_log_lines_total = total_dropped_log_lines,
+                    "non-blocking log queue dropped output"
+                );
+                dropped_log_lines = total_dropped_log_lines;
+            }
             if matches!(transport, Transport::Serial { .. }) {
-                println!(
-                    "  serial framing errors total={}",
-                    transport.framing_errors()
+                info!(
+                    serial_framing_errors_total = transport.framing_errors(),
+                    "serial framing statistics"
                 );
             }
             interval_started = now;
@@ -158,6 +218,13 @@ fn handle_datagram(
         }
     };
 
+    trace!(
+        packet_type = packet[3],
+        packet_bytes = packet.len(),
+        sender = ?sender,
+        "valid protocol packet received"
+    );
+
     match datagram {
         DecodedDatagram::Sample(sample) => {
             metrics.record_decoded();
@@ -169,11 +236,13 @@ fn handle_datagram(
         }
         DecodedDatagram::RegistrationRequest(request) => {
             let Some(device_id) = devices.id_for_mac(request.device_mac) else {
+                debug!(sensor_mac = %request.device_mac, "registration request from unconfigured sensor");
                 return;
             };
+            debug!(sensor_mac = %request.device_mac, device_id, "sensor registration requested");
             let response = encode_registration_response(request, device_id);
             if let Err(error) = transport.respond(&response, sender) {
-                eprintln!("registration response failed: {error}");
+                warn!(%error, "registration response failed");
             }
         }
         DecodedDatagram::TimeSyncRequest(request) => {
@@ -185,7 +254,7 @@ fn handle_datagram(
             let response =
                 encode_time_sync_response(request, server_now_us, server_t3_us, server_sync_token);
             if let Err(error) = transport.respond(&response, sender) {
-                eprintln!("time-sync response failed: {error}");
+                warn!(%error, "time-sync response failed");
             }
         }
         DecodedDatagram::TimeSyncReport(report) => {
@@ -200,25 +269,25 @@ fn monotonic_us(start: Instant, now: Instant) -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-fn print_stats(
+fn log_stats(
     elapsed: Duration,
     now: Instant,
     devices: &mut DeviceRegistry,
     metrics: &mut ServerMetrics,
 ) {
     let interval = metrics.take_interval();
-    println!(
-        "\n[{:.3}s] samples={} mapped={} unknown={} malformed={} receive_errors_total={}",
-        elapsed.as_secs_f64(),
-        interval.decoded,
-        interval.mapped,
-        interval.unknown,
-        interval.malformed.values().sum::<u64>(),
-        metrics.receive_errors_total
-    );
-    println!(
-        "  totals decoded={} mapped={} unknown={} malformed={}",
-        metrics.decoded_total, metrics.mapped_total, metrics.unknown_total, metrics.malformed_total
+    info!(
+        elapsed_secs = elapsed.as_secs_f64(),
+        samples = interval.decoded,
+        mapped = interval.mapped,
+        unknown = interval.unknown,
+        malformed = interval.malformed.values().sum::<u64>(),
+        receive_errors_total = metrics.receive_errors_total,
+        decoded_total = metrics.decoded_total,
+        mapped_total = metrics.mapped_total,
+        unknown_total = metrics.unknown_total,
+        malformed_total = metrics.malformed_total,
+        "server statistics"
     );
 
     if !interval.malformed.is_empty() {
@@ -228,24 +297,27 @@ fn print_stats(
             .map(|(kind, count)| format!("{}={count}", kind.label()))
             .collect::<Vec<_>>()
             .join(", ");
-        println!("  rejected: {details}");
+        warn!(malformed = %details, "rejected malformed packets");
     }
     for (id, count) in interval.unknown_by_id {
-        println!("  unassigned device ID 0x{id:04X}: {count} datagram(s)");
+        warn!(
+            device_id = format_args!("0x{id:04X}"),
+            count, "unassigned device ID received"
+        );
     }
     if interval.unknown_unlisted > 0 {
-        println!(
-            "  additional datagrams from unlisted device IDs: {}",
-            interval.unknown_unlisted
+        warn!(
+            count = interval.unknown_unlisted,
+            "additional datagrams from unlisted device IDs"
         );
     }
 
     for state in devices.by_name.values_mut() {
-        print_device_stats(state, elapsed, now);
+        log_device_stats(state, elapsed, now);
     }
 }
 
-fn print_device_stats(state: &mut DeviceState, elapsed: Duration, now: Instant) {
+fn log_device_stats(state: &mut DeviceState, elapsed: Duration, now: Instant) {
     let interval_received = state.take_interval_received();
     let rate = format_rate(interval_received, elapsed);
     let latency = state.take_latency_interval();
@@ -302,18 +374,21 @@ fn print_device_stats(state: &mut DeviceState, elapsed: Duration, now: Instant) 
         None => "latest=none".to_owned(),
     };
 
-    println!(
-        "  {} ({}) rx={rate:.1}/s total={} seq_gaps={} lost_est={} loss={} duplicates={} out_of_order={} restarts={} i2c_errors={} {latency_summary} {latest}",
-        state.logical_name,
-        state.mac,
-        state.received_total,
-        state.sequence_gaps,
-        state.estimated_lost,
-        loss,
-        state.duplicates,
-        state.out_of_order,
-        state.restarts,
-        state.sensor_errors
+    info!(
+        sensor = %state.logical_name,
+        mac = %state.mac,
+        rx_per_sec = rate,
+        total = state.received_total,
+        seq_gaps = state.sequence_gaps,
+        lost_est = state.estimated_lost,
+        loss = %loss,
+        duplicates = state.duplicates,
+        out_of_order = state.out_of_order,
+        restarts = state.restarts,
+        i2c_errors = state.sensor_errors,
+        latency = %latency_summary,
+        latest = %latest,
+        "sensor statistics"
     );
 }
 

@@ -16,6 +16,7 @@ Select the transport with `server.mode`: `"espnow"` for gateway serial, or `"udp
 [server]
 mode = "espnow"
 stats_interval_secs = 1
+log_level = "info" # error, warn, info, debug, trace
 bind_address = "0.0.0.0:5000" # Used only in UDP mode.
 
 [gateway]
@@ -33,6 +34,14 @@ In ESP-NOW mode, `[gateway] serial = "path"` is required; `bind_address` is opti
 In UDP mode, `server.bind_address` is required and `[gateway]` is unused. Use `0.0.0.0:5000` to listen on every IPv4 interface, or select a specific local IPv4 address. Device mappings always use the sensor station MAC printed by its firmware.
 
 `config.toml` is ignored by Git. The example remains tracked, so local IPs, ports, and device MAC mappings do not have to be committed. Do not edit the example with machine-specific values.
+
+`server.log_level` controls runtime log detail and defaults to `info` (`error`,
+`warn`, `info`, `debug`, or `trace`). Logs include timestamps, severity, and
+module target and are written to stderr. A bounded non-blocking queue and
+background writer keep slow output from blocking packet reception; log records
+are dropped if the queue fills. CLI help and configuration errors are printed
+directly because logging is initialized only after a valid configuration has
+been loaded.
 
 ## Run
 

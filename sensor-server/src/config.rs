@@ -10,7 +10,19 @@ use std::time::Duration;
 pub struct ServerConfig {
     pub transport: TransportConfig,
     pub stats_interval: Duration,
+    pub log_level: LogLevel,
     pub devices_by_mac: HashMap<MacAddress, String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Error,
+    Warn,
+    #[default]
+    Info,
+    Debug,
+    Trace,
 }
 
 #[derive(Debug)]
@@ -40,6 +52,8 @@ struct RawConfig {
 struct RawServerConfig {
     #[serde(default)]
     mode: ServerMode,
+    #[serde(default)]
+    log_level: LogLevel,
     bind_address: Option<String>,
     #[serde(default = "default_stats_interval_secs")]
     stats_interval_secs: u64,
@@ -129,6 +143,7 @@ fn validate(raw: RawConfig) -> Result<ServerConfig, String> {
     Ok(ServerConfig {
         transport,
         stats_interval: Duration::from_secs(raw.server.stats_interval_secs),
+        log_level: raw.server.log_level,
         devices_by_mac,
     })
 }

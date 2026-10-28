@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
+use tracing::info;
 
 const READ_TIMEOUT: Duration = Duration::from_millis(100);
 
@@ -31,7 +32,7 @@ impl Transport {
                 socket
                     .set_read_timeout(Some(READ_TIMEOUT))
                     .map_err(|e| e.to_string())?;
-                println!("sensor-server listening on UDP {address}");
+                info!(%address, "listening for UDP sensor packets");
                 Ok(Self::Udp(socket))
             }
             TransportConfig::EspNowSerial { port, baud_rate } => {
@@ -40,7 +41,7 @@ impl Transport {
                     .flow_control(serialport::FlowControl::None)
                     .open()
                     .map_err(|e| format!("cannot open ESP-NOW serial port {port}: {e}"))?;
-                println!("sensor-server receiving ESP-NOW gateway on {port} at {baud_rate} baud");
+                info!(%port, baud_rate, "receiving ESP-NOW gateway serial data");
                 Ok(Self::Serial {
                     port: serial,
                     decoder: Decoder::default(),

@@ -3,6 +3,7 @@ mode = "espnow" # "espnow" (gateway serial) or "udp" (direct Wi-Fi).
 # Used only in UDP mode.
 bind_address = "0.0.0.0:5000"
 stats_interval_secs = 1
+log_level = "info" # error, warn, info, debug, trace
 
 # Gateway settings used in ESP-NOW mode.
 # Use a stable /dev/serial/by-id/... path on Linux, or e.g. "COM7" on Windows.
