@@ -468,7 +468,7 @@ fn send_update(
             sensor.name,
             json!({
                 "angle": sensor.value.angle,
-                "age_us": now.saturating_duration_since(sensor.value.received_at).as_micros().min(u128::from(u64::MAX)) as u64,
+                "age_us": now.saturating_duration_since(sensor.value.received_at).as_micros() as u64,
             }),
         );
     }
@@ -479,8 +479,7 @@ fn send_update(
     let timestamp_us = update
         .timestamp
         .saturating_duration_since(origin)
-        .as_micros()
-        .min(u128::from(u64::MAX)) as u64;
+        .as_micros() as u64;
     let message = json!({
         "event": "update",
         "type": "sensor_data",

@@ -46,6 +46,8 @@ Every packet begins with this four-byte header:
 
 Unknown magic, versions, packet types, or packet lengths are rejected. No V2 compatibility path is supported. Device IDs are encoded as unsigned 16-bit values and are restricted to `0x0000` through `0x00FF`.
 
+All incrementing numeric values wrap at the width of their field: after the maximum value, the next value is zero. Receivers must handle counters and timestamps using modular arithmetic.
+
 ## Startup registration and device ID assignment
 
 After boot or transport reconnection, a sensor repeatedly sends a registration request until it receives an assignment. The request contains its station MAC and a request sequence. The server looks up the MAC in its `[devices]` configuration and replies only for a configured sensor. IDs are assigned from `0x0000` through `0x00FF`, in ascending logical device name order, so the same configuration yields stable assignments across server restarts. A maximum of 256 devices can be configured.

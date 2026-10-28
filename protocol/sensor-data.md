@@ -78,12 +78,12 @@ Full snapshots and incremental updates use the same structure. `event` is `"upda
 | `event` | string | Update event name. Always `"update"`. |
 | `type` | string | Message type. Always `"sensor_data"`. |
 | `seq` | unsigned 64-bit integer | Update message sequence on the current WebSocket connection. Starts at 1 and increments for each update sent. |
-| `timestamp_us` | unsigned 64-bit integer | Timestamp in the server's monotonic clock, in microseconds. It increases monotonically within a server process and is not Unix time. |
+| `timestamp_us` | unsigned 64-bit integer | Timestamp in the server's monotonic clock, in microseconds. It wraps at the unsigned 64-bit maximum and is not Unix time. |
 | `sensor` | object | Mapping from logical sensor names to their latest state. A full snapshot contains all subscribed sensors with available readings; an incremental message contains only sensors updated by that message. |
 | `sensor.<name>.angle` | number or null | Angle in degrees. `null` indicates an invalid I2C reading. |
-| `sensor.<name>.age_us` | unsigned 64-bit integer | Age of the reading when the message is sent, in microseconds: the server's current monotonic time minus the time it most recently received that reading. |
+| `sensor.<name>.age_us` | unsigned 64-bit integer | Age of the reading when the message is sent, in microseconds: the server's current monotonic time minus the time it most recently received that reading. It wraps at the unsigned 64-bit maximum. |
 
-`seq` is the WebSocket update message sequence, not a sensor firmware sample sequence. Per-sensor sample sequence numbers are outside the scope of this API. For a full snapshot, `seq` identifies the snapshot message; incremental frames then increment it in send order. The sequence restarts at 1 after reconnecting.
+All incrementing numeric values wrap at their field width: after the maximum value, the next value is zero. Clients should compare them using modular arithmetic. `seq` is the WebSocket update message sequence, not a sensor firmware sample sequence. Per-sensor sample sequence numbers are outside the scope of this API. For a full snapshot, `seq` identifies the snapshot message; incremental frames then increment it in send order. The sequence restarts at 1 after reconnecting.
 
 ## Errors
 
