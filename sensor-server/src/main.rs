@@ -273,7 +273,12 @@ fn handle_datagram(
                     && let Some(latest) = devices.by_name.get(name).and_then(|state| state.latest)
                     && latest.received_at == received_at
                 {
-                    websocket.publish(name, latest.sample.angle_degrees(), received_at);
+                    websocket.publish(
+                        name,
+                        latest.sample.angle_degrees(),
+                        latest.sample.timestamp_us,
+                        received_at,
+                    );
                 }
             } else {
                 metrics.record_unknown(sample.device_id);

@@ -54,6 +54,8 @@ struct Client {
 #[derive(Clone)]
 struct SensorValue {
     angle: Option<f64>,
+    rad_s: Option<f64>,
+    sample_timestamp_us: u32,
     received_at: Instant,
 }
 
@@ -92,11 +94,32 @@ impl WebSocketHub {
         }
     }
 
-    pub fn publish(&self, name: &str, angle: Option<f64>, received_at: Instant) {
+    pub fn publish(
+        &self,
+        name: &str,
+        angle: Option<f64>,
+        sample_timestamp_us: u32,
+        received_at: Instant,
+    ) {
         let Ok(mut state) = self.shared.state.lock() else {
             return;
         };
-        let value = SensorValue { angle, received_at };
+        let rad_s = state.latest.get(name).and_then(|previous| {
+            let previous_angle = previous.angle?;
+            let current_angle = angle?;
+            let elapsed_us = sample_timestamp_us.wrapping_sub(previous.sample_timestamp_us);
+            if elapsed_us == 0 || elapsed_us >= (1_u32 << 31) {
+                return None;
+            }
+            let delta_degrees = (current_angle - previous_angle + 180.0).rem_euclid(360.0) - 180.0;
+            Some(delta_degrees.to_radians() / (f64::from(elapsed_us) / 1_000_000.0))
+        });
+        let value = SensorValue {
+            angle,
+            rad_s,
+            sample_timestamp_us,
+            received_at,
+        };
         state.latest.insert(name.to_owned(), value.clone());
         state.last_sensor_packet = received_at;
         let update = HubUpdate {
@@ -468,6 +491,7 @@ fn send_update(
             sensor.name,
             json!({
                 "angle": sensor.value.angle,
+                "rad_s": sensor.value.rad_s,
                 "age_us": now.saturating_duration_since(sensor.value.received_at).as_micros() as u64,
             }),
         );
