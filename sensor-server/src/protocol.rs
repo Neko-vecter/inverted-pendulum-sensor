@@ -109,9 +109,15 @@ impl SensorSample {
     pub const fn has_i2c_error(self) -> bool {
         self.status & STATUS_I2C_ERROR != 0
     }
-    pub fn angle_degrees(self) -> Option<f64> {
-        self.angle_is_valid()
-            .then(|| f64::from(self.raw_angle) * 360.0 / 16_384.0)
+    pub fn angle_radians(self) -> Option<f64> {
+        self.angle_is_valid().then(|| {
+            let angle = f64::from(self.raw_angle) * std::f64::consts::TAU / 16_384.0;
+            if angle >= std::f64::consts::PI {
+                angle - std::f64::consts::TAU
+            } else {
+                angle
+            }
+        })
     }
 }
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]

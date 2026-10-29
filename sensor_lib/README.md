@@ -30,8 +30,8 @@ The caller must run these methods inside an asyncio event loop. Calling `subscri
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `reading.angle` | `float \| None` | Latest angle in degrees; `None` indicates an invalid I2C reading. |
-| `reading.rad_s` | `float \| None` | Latest angular velocity in radians per second; `None` means the server cannot calculate it yet. |
+| `reading.angle` | `float \| None` | Latest angle in radians, normalized to $[-\pi, \pi)$ ; zero and positive direction follow the sensor's physical orientation, with no zero-offset calibration. `None` indicates an invalid I2C reading. |
+| `reading.rad_s` | `float \| None` | Latest signed angular velocity in radians per second. Its magnitude is not limited to $\pi$; `None` means the server cannot calculate it yet. |
 | `reading.age_us` | `int` | Age of the angle reading, in microseconds, when the server sent the update. |
 
 ## Errors

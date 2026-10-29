@@ -92,7 +92,7 @@ The sample packet is encoded field by field, without compiler padding.
 
 Total sample length is **20 bytes**.
 
-The MT6701 angle is a 14-bit unsigned count. For a valid reading, `angle_status[15:14]` is `00` and `angle_status[13:0]` contains 0 through 16,383. Convert it to degrees with `raw_angle * 360.0 / 16384.0`. State `01` means I2C error and requires all lower angle bits to be zero. States `10` and `11` are reserved and rejected.
+The MT6701 angle is a 14-bit unsigned count. For a valid reading, `angle_status[15:14]` is `00` and `angle_status[13:0]` contains 0 through 16,383. The sensor-data API converts it to radians and wraps it into `$[-\pi, \pi)$`, preserving the sensor's zero and positive direction without applying a zero-offset calibration. State `01` means I2C error and requires all lower angle bits to be zero. States `10` and `11` are reserved and rejected.
 
 The assigned device ID identifies the sensor and maps to its configured logical device name. The station MAC is used only for registration and the registration response. The 32-bit sequence begins at zero after boot and advances for each sampling slot, including slots whose sample is not transmitted. The server uses modular differences to estimate packet loss; it cannot distinguish network loss from samples omitted by firmware.
 

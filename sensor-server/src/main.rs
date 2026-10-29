@@ -275,7 +275,7 @@ fn handle_datagram(
                 {
                     websocket.publish(
                         name,
-                        latest.sample.angle_degrees(),
+                        latest.sample.angle_radians(),
                         latest.sample.timestamp_us,
                         received_at,
                     );
@@ -465,9 +465,9 @@ fn log_device_stats(state: &mut DeviceState, elapsed: Duration, now: Instant) {
             let age_ms = now
                 .saturating_duration_since(latest.received_at)
                 .as_millis();
-            match latest.sample.angle_degrees() {
-                Some(degrees) => format!(
-                    "angle={degrees:.3}deg raw={} seq={} ts={}us age={}ms",
+            match latest.sample.angle_radians() {
+                Some(radians) => format!(
+                    "angle={radians:.3}rad raw={} seq={} ts={}us age={}ms",
                     latest.sample.raw_angle,
                     latest.sample.sequence,
                     latest.sample.timestamp_us,
@@ -635,7 +635,10 @@ mod tests {
         );
         let state = &devices.by_name["sensor_1"];
         assert_eq!(state.received_total, 1);
-        assert_eq!(state.latest.unwrap().sample.angle_degrees(), Some(90.0));
+        assert_eq!(
+            state.latest.unwrap().sample.angle_radians(),
+            Some(std::f64::consts::FRAC_PI_2)
+        );
         assert_eq!(state.latency_samples_us, [200]);
         assert_eq!(metrics.mapped_total, 1);
     }

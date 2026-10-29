@@ -111,8 +111,10 @@ impl WebSocketHub {
             if elapsed_us == 0 || elapsed_us >= (1_u32 << 31) {
                 return None;
             }
-            let delta_degrees = (current_angle - previous_angle + 180.0).rem_euclid(360.0) - 180.0;
-            Some(delta_degrees.to_radians() / (f64::from(elapsed_us) / 1_000_000.0))
+            let delta_radians = (current_angle - previous_angle + std::f64::consts::PI)
+                .rem_euclid(std::f64::consts::TAU)
+                - std::f64::consts::PI;
+            Some(delta_radians / (f64::from(elapsed_us) / 1_000_000.0))
         });
         let value = SensorValue {
             angle,
