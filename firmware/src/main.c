@@ -42,6 +42,9 @@ static i2c_master_dev_handle_t s_mt6701;
 static uint8_t s_station_mac[6];
 static bool s_network_enabled;
 static bool s_measuring;
+static bool s_control_sequence_valid;
+static uint32_t s_control_session_token;
+static uint32_t s_control_sequence;
 
 typedef struct {
     bool assigned;
@@ -75,27 +78,68 @@ static uint32_t monotonic_counter_us(void)
     return (uint32_t)esp_timer_get_time();
 }
 
-static void set_measurement_mode(bool measuring)
+static bool set_measurement_mode(bool measuring)
 {
     if (s_measuring == measuring) {
-        return;
+        return s_sample_timer_running;
+    }
+    if (!s_sample_timer_running) {
+        return false;
     }
     s_measuring = measuring;
     (void)xQueueReset(s_sample_queue);
     (void)ulTaskNotifyTake(pdTRUE, 0);
-    if (!s_sample_timer_running) {
-        return;
-    }
     ESP_ERROR_CHECK(esp_timer_stop(s_sample_timer));
     const uint64_t period_us = measuring ? SAMPLE_PERIOD_US : IDLE_SAMPLE_PERIOD_US;
     ESP_ERROR_CHECK(esp_timer_start_periodic(s_sample_timer, period_us));
     ESP_LOGI(TAG, "Measurement %s; sampling period=%" PRIu64 " us",
              measuring ? "started" : "stopped", period_us);
+    return true;
 }
 
 static bool counter_deadline_reached(uint32_t now_us, uint32_t deadline_us)
 {
     return (uint32_t)(now_us - deadline_us) < COUNTER_HALF_RANGE_US;
+}
+
+static void handle_sensor_control(const sensor_control_command_t *control)
+{
+    if (!s_registration.assigned || control->device_id != s_registration.device_id) {
+        return;
+    }
+
+    const bool measuring = control->command == SENSOR_CONTROL_START_MEASUREMENT;
+    bool accept = !s_control_sequence_valid ||
+                  control->session_token != s_control_session_token;
+    if (!accept && control->sequence == s_control_sequence) {
+        // Repeated commands are expected until the server receives our ACK.
+        accept = s_measuring == measuring;
+    } else if (!accept) {
+        const uint32_t delta = control->sequence - s_control_sequence;
+        accept = delta < COUNTER_HALF_RANGE_US;
+    }
+    if (!accept) {
+        return;
+    }
+
+    if (!set_measurement_mode(measuring)) {
+        return;
+    }
+    s_control_session_token = control->session_token;
+    s_control_sequence = control->sequence;
+    s_control_sequence_valid = true;
+
+    const sensor_control_ack_t ack = {
+        .device_id = control->device_id,
+        .command = control->command,
+        .session_token = control->session_token,
+        .sequence = control->sequence,
+    };
+    uint8_t packet[SENSOR_PROTOCOL_SENSOR_CONTROL_ACK_SIZE];
+    const size_t packet_length = sensor_protocol_encode_sensor_control_ack(&ack, packet);
+    if (packet_length == 0U || !sensor_transport_send(packet, packet_length)) {
+        ESP_LOGW(TAG, "Could not send measurement control ACK");
+    }
 }
 
 static uint32_t process_time_sync_responses(uint32_t *sync_errors_in_interval)
@@ -112,9 +156,7 @@ static uint32_t process_time_sync_responses(uint32_t *sync_errors_in_interval)
 
         sensor_control_command_t control = {0};
         if (sensor_protocol_decode_sensor_control(packet, packet_length, &control)) {
-            if (s_registration.assigned && control.device_id == s_registration.device_id) {
-                set_measurement_mode(control.command == SENSOR_CONTROL_START_MEASUREMENT);
-            }
+            handle_sensor_control(&control);
             continue;
         }
 

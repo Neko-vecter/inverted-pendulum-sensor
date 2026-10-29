@@ -6,7 +6,7 @@ use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 use tracing::info;
 
-const READ_TIMEOUT: Duration = Duration::from_millis(100);
+const READ_TIMEOUT: Duration = Duration::from_millis(10);
 
 pub struct ReceivedPacket {
     pub data: Vec<u8>,

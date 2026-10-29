@@ -38,7 +38,7 @@ The channel must match the gateway (default 1). Samples and clock-sync requests 
 To select Wi-Fi / UDP instead:
 
 For Wi-Fi / UDP, set `SENSOR_USE_ESPNOW` to `0` and edit `SENSOR_WIFI_SSID`,
-`SENSOR_WIFI_PASSWORD`, `SENSOR_SERVER_IPV4`, and `SENSOR_SERVER_PORT` in the
+`SENSOR_WIFI_PASSWORD`, `SENSOR_SERVER_IPV3`, and `SENSOR_SERVER_PORT` in the
 same header. CMake watches `src/config.h` and selects the matching transport
 sources when it changes; no `menuconfig` or sdkconfig regeneration is needed.
 
@@ -64,6 +64,7 @@ The firmware logs its station MAC. Map this MAC to a logical name in the server 
 - ESP-NOW sends are submitted immediately without waiting for the previous send callback; driver submission failures are counted. Receive callbacks only copy registration, sync replies, and measurement commands to a bounded queue; they never block.
 - V3 sensors register at startup with their station MAC and receive a server-assigned 2-byte ID in the range `0x0000` through `0x00FF`. Samples are 20 bytes; time-sync requests, responses and reports are 14, 26 and 22 bytes. Subsequent packets carry only the assigned ID. The sensor returns `t4` in the completion report; the server computes and stores the offset and RTT. ESP-NOW responses travel through the gateway serial port.
 - Active sampling targets 1 kHz; idle sampling targets 1 Hz. Delivered rates depend on radio contention, I2C and serial throughput; broadcast submission does not acknowledge remote reception and samples are not retransmitted.
+- Measurement start/stop commands are applied idempotently and acknowledged with the command session and sequence. Repeated commands are acknowledged again without toggling an already-correct mode.
 - Five-second logs report sampling, queue drops, offline reads, transport submission failures and clock sync. ESP-NOW considers the radio ready after initialization even if no gateway is present.
 - The timestamp precedes the MT6701 I2C read; latency does not subtract the sensor's internal measurement delay.
 

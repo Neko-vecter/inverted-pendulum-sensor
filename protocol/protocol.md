@@ -1,6 +1,6 @@
-﻿# Sensor Protocol, Version 3
+# Sensor Protocol, Version 3
 
-This document defines the only supported wire protocol between ESP32 sensor nodes and the Rust Sensor Server. Packets travel either through ESP-NOW and the USB serial gateway or directly over Wi-Fi / UDP. Receivers accept version 3 only; version 2 packets are rejected.
+This document defines the only supported wire protocol between ESP32 sensor nodes and the Rust Sensor Server. Packets travel either through ESP-NOW and the USB serial gateway or directly over Wi-Fi / UDP. Receivers accept version 3 only; older protocol versions are rejected.
 
 ## Transport
 
@@ -13,12 +13,12 @@ This document defines the only supported wire protocol between ESP32 sensor node
 | Idle sample target | 1 packet/s per node; clock synchronization remains at 1 Hz |
 | Registration request / response | 14 / 16 bytes |
 | Sample packet | 20 bytes |
-| Measurement control command | 7 bytes |
+| Measurement control command / ACK | 15 / 15 bytes |
 | Sync request | 14 bytes |
 | Sync response | 26 bytes |
 | Sync completion report | 22 bytes |
 | Byte order | Big-endian for multi-byte fields |
-| Retransmission | None |
+| Retransmission | Control commands are retried every 50 ms until acknowledged |
 
 ESP-NOW uses unencrypted broadcast on a fixed channel. Broadcast submission is not a receiver acknowledgement. The gateway checks a registration request's embedded MAC against its radio source MAC. After assignment, it validates each packet's device ID against the MAC learned from the server's registration response. One gateway/server should be active per channel.
 
@@ -42,9 +42,9 @@ Every packet begins with this four-byte header:
 | ---: | ---: | --- | --- |
 | 0 | 2 | magic | Unsigned 16-bit big-endian, `0x4950` |
 | 2 | 1 | version | `3` |
-| 3 | 1 | packet_type | Sample `0x01`, sync request `0x02`, sync response `0x03`, sync completion report `0x04`, registration request `0x05`, registration response `0x06`, measurement control `0x07` |
+| 3 | 1 | packet_type | Sample `0x01`, sync request `0x02`, sync response `0x03`, sync completion report `0x04`, registration request `0x05`, registration response `0x06`, measurement control `0x07`, measurement control ACK `0x08` |
 
-Unknown magic, versions, packet types, or packet lengths are rejected. No V2 compatibility path is supported. Device IDs are encoded as unsigned 16-bit values and are restricted to `0x0000` through `0x00FF`.
+Unknown magic, versions, packet types, or packet lengths are rejected. No older protocol compatibility path is supported. Device IDs are encoded as unsigned 16-bit values and are restricted to `0x0000` through `0x00FF`.
 
 All incrementing numeric values wrap at the width of their field: after the maximum value, the next value is zero. Receivers must handle counters and timestamps using modular arithmetic.
 
@@ -180,8 +180,24 @@ The server sends a measurement control command to each configured device in resp
 | 0 | 4 | Header | Version 3, type `0x07` |
 | 4 | 2 | device_id | Assigned ID from startup registration |
 | 6 | 1 | command | Start measurement `0x01`; stop measurement and return to idle `0x02` |
+| 7 | 4 | session_token | Nonzero server-process token; identifies this command session |
+| 11 | 4 | command_sequence | Unsigned 32-bit sequence, incremented for each new command |
 
-Total command length is **7 bytes**. In ESP-NOW mode, the gateway broadcasts each command and each sensor applies only commands addressed to its assigned device ID. In UDP mode, the server sends the command to that sensor's most recently observed UDP address.
+Total command length is **15 bytes**. In ESP-NOW mode, the gateway broadcasts each command and each sensor applies only commands addressed to its assigned device ID. In UDP mode, the server sends the command to that sensor's most recently observed UDP address. If no matching acknowledgment arrives, the server retries the command every 50 ms. Repeated commands are safe: the sensor re-acknowledges the command if that session, sequence, and mode are already active, and ignores older sequences in the current session.
+
+### Acknowledgment: sensor to server
+
+The sensor sends an acknowledgment after applying the requested mode. If it already has the requested mode, it acknowledges the matching repeated command without toggling the sampling timer.
+
+| Offset | Length | Field | Encoding |
+| ---: | ---: | --- | --- |
+| 0 | 4 | Header | Version 3, type `0x08` |
+| 4 | 2 | device_id | Assigned device ID |
+| 6 | 1 | command | Acknowledged start `0x01` or stop `0x02` command |
+| 7 | 4 | session_token | Echoed command session token |
+| 11 | 4 | command_sequence | Echoed command sequence |
+
+Total acknowledgment length is **15 bytes**. The server stops retrying only when device ID, command, session token, and sequence all match the outstanding command. The gateway validates the acknowledgment source MAC against the registration binding before forwarding it to the server. The acknowledgment confirms the sensor applied the mode; it does not guarantee subsequent sample delivery.
 
 ## Scope
 

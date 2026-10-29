@@ -7,7 +7,8 @@ pub const TIME_SYNC_RESPONSE_SIZE: usize = 26;
 pub const TIME_SYNC_REPORT_SIZE: usize = 22;
 pub const REGISTRATION_REQUEST_SIZE: usize = 14;
 pub const REGISTRATION_RESPONSE_SIZE: usize = 16;
-pub const SENSOR_CONTROL_SIZE: usize = 7;
+pub const SENSOR_CONTROL_SIZE: usize = 15;
+pub const SENSOR_CONTROL_ACK_SIZE: usize = 15;
 const MAGIC: u16 = 0x4950;
 const VERSION: u8 = 3;
 const TYPE_SAMPLE: u8 = 0x01;
@@ -17,6 +18,7 @@ const TYPE_TIME_SYNC_REPORT: u8 = 0x04;
 const TYPE_REGISTRATION_REQUEST: u8 = 0x05;
 const TYPE_REGISTRATION_RESPONSE: u8 = 0x06;
 const TYPE_SENSOR_CONTROL: u8 = 0x07;
+const TYPE_SENSOR_CONTROL_ACK: u8 = 0x08;
 const STATUS_ANGLE_VALID: u8 = 0x01;
 const STATUS_I2C_ERROR: u8 = 0x02;
 const MAX_ANGLE: u16 = 0x3FFF;
@@ -91,6 +93,13 @@ pub struct RegistrationRequest {
     pub sequence: u32,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SensorControlAck {
+    pub device_id: u16,
+    pub command: SensorControl,
+    pub session_token: u32,
+    pub sequence: u32,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SensorControl {
     StartMeasurement,
     StopMeasurement,
@@ -101,6 +110,7 @@ pub enum DecodedDatagram {
     TimeSyncRequest(TimeSyncRequest),
     TimeSyncReport(TimeSyncReport),
     RegistrationRequest(RegistrationRequest),
+    SensorControlAck(SensorControlAck),
 }
 impl SensorSample {
     pub const fn angle_is_valid(self) -> bool {
@@ -165,6 +175,9 @@ pub fn decode_datagram(packet: &[u8]) -> Result<DecodedDatagram, DecodeError> {
         }
         TYPE_REGISTRATION_REQUEST => {
             decode_registration_request(packet).map(DecodedDatagram::RegistrationRequest)
+        }
+        TYPE_SENSOR_CONTROL_ACK => {
+            decode_sensor_control_ack(packet).map(DecodedDatagram::SensorControlAck)
         }
         _ => Err(DecodeError::PacketType),
     }
@@ -234,6 +247,22 @@ fn decode_registration_request(p: &[u8]) -> Result<RegistrationRequest, DecodeEr
         sequence: u32::from_be_bytes(p[10..14].try_into().unwrap()),
     })
 }
+fn decode_sensor_control_ack(p: &[u8]) -> Result<SensorControlAck, DecodeError> {
+    if p.len() != SENSOR_CONTROL_ACK_SIZE {
+        return Err(DecodeError::Length);
+    }
+    let command = match p[6] {
+        1 => SensorControl::StartMeasurement,
+        2 => SensorControl::StopMeasurement,
+        _ => return Err(DecodeError::PacketType),
+    };
+    Ok(SensorControlAck {
+        device_id: read_id(p)?,
+        command,
+        session_token: u32::from_be_bytes(p[7..11].try_into().unwrap()),
+        sequence: u32::from_be_bytes(p[11..15].try_into().unwrap()),
+    })
+}
 pub fn encode_time_sync_response(
     r: TimeSyncRequest,
     t2: u32,
@@ -261,7 +290,12 @@ pub fn encode_registration_response(
     p[14..16].copy_from_slice(&id.to_be_bytes());
     p
 }
-pub fn encode_sensor_control(device_id: u16, command: SensorControl) -> [u8; SENSOR_CONTROL_SIZE] {
+pub fn encode_sensor_control(
+    device_id: u16,
+    command: SensorControl,
+    session_token: u32,
+    sequence: u32,
+) -> [u8; SENSOR_CONTROL_SIZE] {
     let mut packet = [0; SENSOR_CONTROL_SIZE];
     write_header(&mut packet, TYPE_SENSOR_CONTROL);
     packet[4..6].copy_from_slice(&device_id.to_be_bytes());
@@ -269,6 +303,21 @@ pub fn encode_sensor_control(device_id: u16, command: SensorControl) -> [u8; SEN
         SensorControl::StartMeasurement => 1,
         SensorControl::StopMeasurement => 2,
     };
+    packet[7..11].copy_from_slice(&session_token.to_be_bytes());
+    packet[11..15].copy_from_slice(&sequence.to_be_bytes());
+    packet
+}
+#[cfg(test)]
+pub fn encode_sensor_control_ack(ack: SensorControlAck) -> [u8; SENSOR_CONTROL_ACK_SIZE] {
+    let mut packet = [0; SENSOR_CONTROL_ACK_SIZE];
+    write_header(&mut packet, TYPE_SENSOR_CONTROL_ACK);
+    packet[4..6].copy_from_slice(&ack.device_id.to_be_bytes());
+    packet[6] = match ack.command {
+        SensorControl::StartMeasurement => 1,
+        SensorControl::StopMeasurement => 2,
+    };
+    packet[7..11].copy_from_slice(&ack.session_token.to_be_bytes());
+    packet[11..15].copy_from_slice(&ack.sequence.to_be_bytes());
     packet
 }
 fn read_mac(b: &[u8]) -> MacAddress {

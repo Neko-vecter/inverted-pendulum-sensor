@@ -86,7 +86,8 @@ static void receive_packet(const esp_now_recv_info_t *info, const uint8_t *data,
         valid = memcmp(info->src_addr, data + 4, 6) == 0;
     } else if ((data[3] == SENSOR_PROTOCOL_TYPE_SAMPLE && length == SENSOR_PROTOCOL_PACKET_SIZE) ||
                (data[3] == SENSOR_PROTOCOL_TYPE_TIME_SYNC_REQUEST && length == SENSOR_PROTOCOL_SYNC_REQUEST_SIZE) ||
-               (data[3] == SENSOR_PROTOCOL_TYPE_TIME_SYNC_REPORT && length == SENSOR_PROTOCOL_SYNC_REPORT_SIZE)) {
+               (data[3] == SENSOR_PROTOCOL_TYPE_TIME_SYNC_REPORT && length == SENSOR_PROTOCOL_SYNC_REPORT_SIZE) ||
+               (data[3] == SENSOR_PROTOCOL_TYPE_SENSOR_CONTROL_ACK && length == SENSOR_PROTOCOL_SENSOR_CONTROL_ACK_SIZE)) {
         const uint16_t id = read_u16_be(data + 4);
         if (id <= 0xffU) {
             portENTER_CRITICAL(&s_binding_lock);
@@ -156,7 +157,8 @@ static void forward_to_nodes(void *argument)
             const bool sync_response = size == SENSOR_PROTOCOL_SYNC_RESPONSE_SIZE && packet[3] == SENSOR_PROTOCOL_TYPE_TIME_SYNC_RESPONSE;
             const bool registration_response = size == SENSOR_PROTOCOL_REGISTRATION_RESPONSE_SIZE && packet[3] == SENSOR_PROTOCOL_TYPE_REGISTRATION_RESPONSE;
             const bool sensor_control = size == SENSOR_PROTOCOL_SENSOR_CONTROL_SIZE && packet[3] == SENSOR_PROTOCOL_TYPE_SENSOR_CONTROL;
-            if (size >= 4 && packet[0] == 0x49 && packet[1] == 0x50 && packet[2] == SENSOR_PROTOCOL_VERSION && (sync_response || registration_response || sensor_control)) {
+            const bool sensor_control_ack = size == SENSOR_PROTOCOL_SENSOR_CONTROL_ACK_SIZE && packet[3] == SENSOR_PROTOCOL_TYPE_SENSOR_CONTROL_ACK;
+            if (size >= 4 && packet[0] == 0x49 && packet[1] == 0x50 && packet[2] == SENSOR_PROTOCOL_VERSION && (sync_response || registration_response || sensor_control || sensor_control_ack)) {
                 if (sensor_control && read_u16_be(packet + 4) > 0xffU) continue;
                 if (registration_response) {
                     const uint16_t id = read_u16_be(packet + 14);

@@ -129,7 +129,8 @@ flowchart TD
 | Transmission mode        | One packet per sample |
 | Packet size              | 20-byte version 3 sample |
 | Byte order               | Big endian |
-| Retransmission           | Disabled |
+| Sample retransmission   | Disabled |
+| Control retry           | Every 50 ms until sensor ACK |
 
 ### Packet Format
 
