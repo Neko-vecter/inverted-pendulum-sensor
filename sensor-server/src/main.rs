@@ -355,17 +355,27 @@ fn handle_datagram(
             if let Some(sender) = sender {
                 sensor_peers.insert(ack.device_id, sender);
             }
-            if let Some(state) = sensor_controls.get_mut(&ack.device_id)
+            let newly_acknowledged = if let Some(state) = sensor_controls.get_mut(&ack.device_id)
                 && state.command == ack.command
                 && state.session_token == ack.session_token
                 && state.sequence == ack.sequence
             {
+                let newly_acknowledged = !state.acknowledged;
                 state.acknowledged = true;
                 debug!(
                     device_id = ack.device_id,
                     sequence = ack.sequence,
                     "sensor measurement mode acknowledged"
                 );
+                newly_acknowledged
+            } else {
+                false
+            };
+            if newly_acknowledged {
+                match ack.command {
+                    SensorControl::StartMeasurement => devices.start_measurement(ack.device_id),
+                    SensorControl::StopMeasurement => devices.stop_measurement(ack.device_id),
+                }
             }
         }
     }
@@ -687,6 +697,45 @@ mod tests {
             &mut next_control_sequence,
         );
         assert!(sensor_controls[&id].acknowledged);
+
+        websocket.start_measurement();
+        process_control_commands(
+            &websocket,
+            &mut transport,
+            &devices,
+            &sensor_peers,
+            &mut sensor_controls,
+            &mut next_control_sequence,
+            7,
+        );
+        let mut start_control = [0; protocol::SENSOR_CONTROL_SIZE];
+        assert_eq!(
+            client.recv(&mut start_control).unwrap(),
+            protocol::SENSOR_CONTROL_SIZE
+        );
+        assert_eq!(start_control[6], 1);
+        let start_ack = protocol::encode_sensor_control_ack(SensorControlAck {
+            device_id: id,
+            command: SensorControl::StartMeasurement,
+            session_token: 7,
+            sequence: u32::from_be_bytes(start_control[11..15].try_into().unwrap()),
+        });
+        handle_datagram(
+            &start_ack,
+            Some(client.local_addr().unwrap()),
+            Instant::now(),
+            0,
+            start,
+            7,
+            &mut transport,
+            &mut devices,
+            &mut metrics,
+            &websocket,
+            &mut sensor_peers,
+            &mut sensor_controls,
+            &mut next_control_sequence,
+        );
+
         let mut request = vec![0x49, 0x50, 3, 2];
         request.extend(id.to_be_bytes());
         request.extend(42_u32.to_be_bytes());

@@ -36,6 +36,7 @@ pub struct DeviceState {
     pub latency_unsynced: u64,
     pub latency_clock_ahead: u64,
     pub latest_sync_rtt_us: Option<u32>,
+    measurement_active: bool,
     sync_token: u32,
     clock_offset_us: Option<u32>,
     pending_sync: Option<PendingSync>,
@@ -70,6 +71,7 @@ impl DeviceState {
             latency_unsynced: 0,
             latency_clock_ahead: 0,
             latest_sync_rtt_us: None,
+            measurement_active: false,
             sync_token,
             clock_offset_us: None,
             pending_sync: None,
@@ -84,40 +86,54 @@ impl DeviceState {
         if sample.has_i2c_error() {
             self.sensor_errors += 1;
         }
-        self.record_latency(sample, server_now_us);
+        if self.measurement_active {
+            self.record_latency(sample, server_now_us);
+        }
 
         let mut advances_sequence = false;
         let mut is_restart = false;
         match (self.last_sequence, self.last_timestamp_us) {
             (None, _) => {
-                self.sequence_slots += 1;
+                if self.measurement_active {
+                    self.sequence_slots += 1;
+                }
                 advances_sequence = true;
             }
             (Some(_), Some(last_timestamp_us))
                 if timestamp_is_behind(sample.timestamp_us, last_timestamp_us) =>
             {
-                self.restarts += 1;
-                self.sequence_slots += 1;
+                if self.measurement_active {
+                    self.restarts += 1;
+                    self.sequence_slots += 1;
+                }
                 advances_sequence = true;
                 is_restart = true;
             }
             (Some(last_sequence), Some(_)) => {
                 let delta = sample.sequence.wrapping_sub(last_sequence);
                 if delta == 0 {
-                    self.duplicates += 1;
+                    if self.measurement_active {
+                        self.duplicates += 1;
+                    }
                 } else if delta < (1_u32 << 31) {
-                    self.sequence_slots += u64::from(delta);
-                    if delta > 1 {
-                        self.sequence_gaps += 1;
-                        self.estimated_lost += u64::from(delta - 1);
+                    if self.measurement_active {
+                        self.sequence_slots += u64::from(delta);
+                        if delta > 1 {
+                            self.sequence_gaps += 1;
+                            self.estimated_lost += u64::from(delta - 1);
+                        }
                     }
                     advances_sequence = true;
                 } else {
-                    self.out_of_order += 1;
+                    if self.measurement_active {
+                        self.out_of_order += 1;
+                    }
                 }
             }
             _ => {
-                self.sequence_slots += 1;
+                if self.measurement_active {
+                    self.sequence_slots += 1;
+                }
                 advances_sequence = true;
             }
         }
@@ -139,6 +155,28 @@ impl DeviceState {
                 });
             }
         }
+    }
+
+    fn start_measurement(&mut self) {
+        self.measurement_active = true;
+        self.sequence_slots = 0;
+        self.sequence_gaps = 0;
+        self.estimated_lost = 0;
+        self.duplicates = 0;
+        self.out_of_order = 0;
+        self.restarts = 0;
+        self.latency_samples_us.clear();
+        self.latency_total_samples = 0;
+        self.latency_unsynced = 0;
+        self.latency_clock_ahead = 0;
+        // The first active sample establishes the loss-detection baseline. This
+        // prevents the idle-to-measurement sequence jump from looking like loss.
+        self.last_sequence = None;
+        self.last_timestamp_us = None;
+    }
+
+    fn stop_measurement(&mut self) {
+        self.measurement_active = false;
     }
 
     fn record_latency(&mut self, sample: SensorSample, server_now_us: u32) {
@@ -295,6 +333,22 @@ impl DeviceRegistry {
             true
         } else {
             false
+        }
+    }
+
+    pub fn start_measurement(&mut self, id: u16) {
+        if let Some(name) = self.by_id.get(&id)
+            && let Some(state) = self.by_name.get_mut(name)
+        {
+            state.start_measurement();
+        }
+    }
+
+    pub fn stop_measurement(&mut self, id: u16) {
+        if let Some(name) = self.by_id.get(&id)
+            && let Some(state) = self.by_name.get_mut(name)
+        {
+            state.stop_measurement();
         }
     }
 
