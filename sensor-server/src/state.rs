@@ -175,6 +175,17 @@ impl DeviceState {
         self.last_timestamp_us = None;
     }
 
+    fn reset_transport_session(&mut self) {
+        // A sensor restart resets its monotonic clock and sample sequence. Do
+        // not compare the new session against timestamps from before reboot.
+        self.latest = None;
+        self.pending_sync = None;
+        self.clock_offset_us = None;
+        self.latest_sync_rtt_us = None;
+        self.last_sequence = None;
+        self.last_timestamp_us = None;
+    }
+
     fn stop_measurement(&mut self) {
         self.measurement_active = false;
     }
@@ -349,6 +360,14 @@ impl DeviceRegistry {
             && let Some(state) = self.by_name.get_mut(name)
         {
             state.stop_measurement();
+        }
+    }
+
+    pub fn reset_transport_session(&mut self, id: u16) {
+        if let Some(name) = self.by_id.get(&id)
+            && let Some(state) = self.by_name.get_mut(name)
+        {
+            state.reset_transport_session();
         }
     }
 

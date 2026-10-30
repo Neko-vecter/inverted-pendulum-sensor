@@ -10,7 +10,7 @@ This document defines the only supported wire protocol between ESP32 sensor node
 | Optional transport | Wi-Fi / UDP over IPv4 |
 | ESP-NOW channel | 1 by default; sensor and gateway must match |
 | Active sample target | 1,000 packets/s per node |
-| Idle sample target | 1 packet/s per node; clock synchronization remains at 1 Hz |
+| Idle sample target | 10 packets/s per node; clock synchronization remains at 1 Hz |
 | Registration request / response | 14 / 16 bytes |
 | Sample packet | 20 bytes |
 | Measurement control command / ACK | 15 / 15 bytes |
@@ -52,7 +52,7 @@ All incrementing numeric values wrap at the width of their field: after the maxi
 
 After boot or transport reconnection, a sensor repeatedly sends a registration request until it receives an assignment. The request contains its station MAC and a request sequence. The server looks up the MAC in its `[devices]` configuration and replies only for a configured sensor. IDs are assigned from `0x0000` through `0x00FF`, in ascending logical device name order, so the same configuration yields stable assignments across server restarts. A maximum of 256 devices can be configured.
 
-The sensor accepts a response only when its MAC and request sequence match the pending request. The gateway learns the ID-to-MAC mapping from the response before broadcasting it to sensors. Until assigned, a sensor sends no samples or time-sync packets. Registration retries occur about once per second.
+The sensor accepts a response only when its MAC and request sequence match the pending request. The gateway learns the ID-to-MAC mapping from the response before broadcasting it to sensors. Until assigned, a sensor sends no samples or time-sync packets. Registration retries occur about 10 times per second (every 100 ms).
 
 ### Registration request: sensor to server
 
@@ -171,7 +171,7 @@ The server reports P50, P75, P90, and P99 per configured device and statistics i
 
 ## Measurement control
 
-The server sends a measurement control command to each configured device in response to the WebSocket `start` and `stop` controls documented in [`sensor-data.md`](sensor-data.md). A new sensor starts in idle mode: it samples and sends one angle per second while continuing the one-hertz clock synchronization exchange. `start` switches sampling and sample transmission to the 1,000 Hz target. `stop` returns the sensor to one angle sample per second and leaves clock synchronization enabled.
+The server sends a measurement control command to each configured device in response to the WebSocket `start` and `stop` controls documented in [`sensor-data.md`](sensor-data.md). A new sensor starts in idle mode: it samples and sends 10 angles per second while continuing the one-hertz clock synchronization exchange. `start` switches sampling and sample transmission to the 1,000 Hz target. `stop` returns the sensor to 10 angle samples per second and leaves clock synchronization enabled.
 
 ### Command: server to sensor
 

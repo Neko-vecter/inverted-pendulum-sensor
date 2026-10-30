@@ -308,6 +308,7 @@ fn handle_datagram(
                 debug!(sensor_mac = %request.device_mac, "registration request from unconfigured sensor");
                 return;
             };
+            devices.reset_transport_session(device_id);
             if let Some(sender) = sender {
                 sensor_peers.insert(device_id, sender);
             }

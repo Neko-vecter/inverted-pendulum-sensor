@@ -2,7 +2,7 @@
 
 ## System Overview
 
-The system consists of ESP32 sensor nodes, each connected to an MT6701 magnetic angle sensor. Nodes sample at 1 Hz while idle and target 1000 samples per second during active measurement. ESP-NOW is the default transport. An ESP32-C6 gateway forwards packets over native USB serial to the Rust Sensor Server. Wi-Fi / UDP remains selectable in sensor sdkconfig and server configuration.
+The system consists of ESP32 sensor nodes, each connected to an MT6701 magnetic angle sensor. Nodes sample at 10 Hz while idle and target 1000 samples per second during active measurement. ESP-NOW is the default transport. An ESP32-C6 gateway forwards packets over native USB serial to the Rust Sensor Server. Wi-Fi / UDP remains selectable in sensor sdkconfig and server configuration.
 
 ```mermaid
 flowchart LR
@@ -26,7 +26,7 @@ Each supported sensor board runs the same firmware. Its station MAC is used for 
 ```mermaid
 flowchart TD
     Sensor["MT6701 Sensor"] --> Driver["I2C Sensor Driver"]
-    Driver --> Sampler["1 Hz idle / 1 kHz active sampling"]
+    Driver --> Sampler["10 Hz idle / 1 kHz active sampling"]
     Sampler --> Queue["Bounded Sample Queue"]
     Queue --> Encoder["Version 3 Packet Encoder"]
     Encoder --> Select{"Transport selected in sdkconfig"}
@@ -40,7 +40,7 @@ flowchart TD
 ### Responsibilities
 
 - **Sensor driver:** Reads the raw 14-bit angle value from the MT6701 over I2C.
-- **Sampling task:** Uses a high-resolution timer for 1 Hz idle angle updates and switches to a 1 ms period for 1000 samples per second after a server start command.
+- **Sampling task:** Uses a high-resolution timer for 10 Hz idle angle updates and switches to a 1 ms period for 1000 samples per second after a server start command.
 - **Sample queue:** Decouples sensor reads from transport submission. Samples can be dropped when the bounded queue fills or the selected transport is unavailable.
 - **Packet encoder:** Encodes samples and clock-sync messages using the version 3 contract in [`protocol/protocol.md`](../protocol/protocol.md). Samples carry a compact session token; clock metadata is sent only in low-rate sync exchanges.
 - **ESP-NOW transport:** Sends broadcasts on the configured channel and queues matching sync responses from the gateway. It needs the Wi-Fi radio driver, but does not start an access point connection, IP stack, or UDP application code.
@@ -125,7 +125,7 @@ flowchart TD
 | Optional transport       | Wi-Fi / UDP over IPv4 |
 | UDP listen port          | 5000 (default, UDP mode) |
 | ESP-NOW channel          | 1 (default; must match the gateway) |
-| Sampling rate            | 1 Hz idle; 1000 Hz active target per node |
+| Sampling rate            | 10 Hz idle; 1000 Hz active target per node |
 | Transmission mode        | One packet per sample |
 | Packet size              | 20-byte version 3 sample |
 | Byte order               | Big endian |
@@ -147,7 +147,7 @@ All nodes use the same firmware. On startup each registers its Wi-Fi station MAC
 ### Included
 
 - MT6701 raw angle acquisition.
-- 1 Hz idle angle updates and 1000 Hz active sampling target per node.
+- 10 Hz idle angle updates and 1000 Hz active sampling target per node.
 - ESP-NOW sample and clock-sync transmission through a serial gateway by default.
 - Optional Wi-Fi connectivity, automatic reconnection, and UDP packet transmission.
 - Rust UDP and framed-serial packet reception and validation.
@@ -183,4 +183,4 @@ flowchart LR
 
 The separation ensures that sensor acquisition and motion control can evolve independently.
 
-**MVP Acceptance Criteria:** The Rust Sensor Server can receive synchronized 1 Hz idle angles and switch three physical ESP32-C6 nodes to a 1000 samples per second active target, while reporting per-device reception rates, packet loss, and synchronized sample-to-receive latency percentiles.
+**MVP Acceptance Criteria:** The Rust Sensor Server can receive synchronized 10 Hz idle angles and switch three physical ESP32-C6 nodes to a 1000 samples per second active target, while reporting per-device reception rates, packet loss, and synchronized sample-to-receive latency percentiles.

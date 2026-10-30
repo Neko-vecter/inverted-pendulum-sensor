@@ -79,7 +79,7 @@ class SensorClient:
         await self._set_measurement_mode(True)
 
     async def stop(self) -> None:
-        """Stop active measurement, return sensors to 1 Hz idle, and await acknowledgement."""
+        """Stop active measurement, return sensors to 10 Hz idle, and await acknowledgement."""
         await self._set_measurement_mode(False)
 
     async def wait_connected(self, timeout: float | None = None) -> None:
