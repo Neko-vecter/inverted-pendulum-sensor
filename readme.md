@@ -32,4 +32,4 @@ This project is in its initial development stage. Features, APIs, and hardware s
 
 The sensor firmware, ESP-NOW gateway and Rust server are independently buildable projects. `protocol/` contains their communication contract as documentation only. The default path is sensor -> ESP-NOW -> gateway -> USB serial -> server. The server selects `mode = "espnow"` or `mode = "udp"` under `[server]`; `[gateway] serial = "path"` selects the serial device.
 
-An async Python WebSocket client that keeps the latest readings in `client.sensors` is available in [`python/`](python/README.md).
+An async Python WebSocket client that keeps the latest readings in `client.sensors` is available in [`lib-sensor/`](lib-sensor/README.md).
