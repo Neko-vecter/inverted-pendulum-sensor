@@ -10,6 +10,19 @@
 static const uint8_t s_broadcast[6] = {255, 255, 255, 255, 255, 255};
 static SemaphoreHandle_t s_send_ready;
 
+static esp_err_t configure_broadcast_rate(void)
+{
+    // Use 802.11n HT20 MCS0 (6.5 Mbps, long guard interval) instead of the
+    // ESP-NOW default 1 Mbps 802.11b rate.
+    esp_now_rate_config_t rate = {
+        .phymode = WIFI_PHY_MODE_HT20,
+        .rate = WIFI_PHY_RATE_MCS0_LGI,
+        .ersu = false,
+        .dcm = false,
+    };
+    return esp_now_set_peer_rate_config(s_broadcast, &rate);
+}
+
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
 static void send_done(const esp_now_send_info_t *info, esp_now_send_status_t status)
 #else
@@ -52,7 +65,8 @@ esp_err_t espnow_radio_start(uint8_t channel, esp_now_recv_cb_t receive_callback
     for (size_t i = 0; i < sizeof(s_broadcast); ++i) {
         peer.peer_addr[i] = s_broadcast[i];
     }
-    return esp_now_add_peer(&peer);
+    ESP_ERROR_CHECK(esp_now_add_peer(&peer));
+    return configure_broadcast_rate();
 }
 
 esp_err_t espnow_radio_send(const uint8_t *packet, size_t length)
