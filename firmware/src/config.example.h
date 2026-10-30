@@ -2,11 +2,11 @@
 
 /* Copy this file to config.h and edit the values for your board/network. */
 
-/* Set to 1 for ESP-NOW, or 0 for Wi-Fi / UDP. */
-#define SENSOR_USE_ESPNOW 1
-
 /* ESP-NOW channel; must match the gateway. Valid range: 1-11. */
 #define SENSOR_ESPNOW_CHANNEL 1
+
+/* Set to 1 for ESP-NOW, or 0 for Wi-Fi / UDP. */
+#define SENSOR_USE_ESPNOW 1
 
 /* Wi-Fi / UDP settings (used when SENSOR_USE_ESPNOW is 0). */
 #define SENSOR_WIFI_SSID ""
