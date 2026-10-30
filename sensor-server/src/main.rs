@@ -205,7 +205,7 @@ fn run(
         process_control_commands(
             &websocket,
             &mut transport,
-            &devices,
+            &mut devices,
             &sensor_peers,
             &mut sensor_controls,
             &mut next_control_sequence,
@@ -356,27 +356,17 @@ fn handle_datagram(
             if let Some(sender) = sender {
                 sensor_peers.insert(ack.device_id, sender);
             }
-            let newly_acknowledged = if let Some(state) = sensor_controls.get_mut(&ack.device_id)
+            if let Some(state) = sensor_controls.get_mut(&ack.device_id)
                 && state.command == ack.command
                 && state.session_token == ack.session_token
                 && state.sequence == ack.sequence
             {
-                let newly_acknowledged = !state.acknowledged;
                 state.acknowledged = true;
                 debug!(
                     device_id = ack.device_id,
                     sequence = ack.sequence,
                     "sensor measurement mode acknowledged"
                 );
-                newly_acknowledged
-            } else {
-                false
-            };
-            if newly_acknowledged {
-                match ack.command {
-                    SensorControl::StartMeasurement => devices.start_measurement(ack.device_id),
-                    SensorControl::StopMeasurement => devices.stop_measurement(ack.device_id),
-                }
             }
         }
     }
@@ -385,7 +375,7 @@ fn handle_datagram(
 fn process_control_commands(
     websocket: &WebSocketHub,
     transport: &mut Transport,
-    devices: &DeviceRegistry,
+    devices: &mut DeviceRegistry,
     sensor_peers: &HashMap<u16, SocketAddr>,
     sensor_controls: &mut HashMap<u16, SensorControlState>,
     next_control_sequence: &mut u32,
@@ -393,9 +383,19 @@ fn process_control_commands(
 ) {
     while let Some(command) = websocket.try_next_control() {
         let measuring = command == ControlCommand::Start;
-        for device in devices.by_name.values() {
+        let device_ids = devices
+            .by_name
+            .values()
+            .map(|device| device.device_id)
+            .collect::<Vec<_>>();
+        for device_id in device_ids {
+            if measuring {
+                devices.start_measurement(device_id);
+            } else {
+                devices.stop_measurement(device_id);
+            }
             issue_sensor_control(
-                device.device_id,
+                device_id,
                 measuring,
                 session_token,
                 next_control_sequence,
@@ -703,7 +703,7 @@ mod tests {
         process_control_commands(
             &websocket,
             &mut transport,
-            &devices,
+            &mut devices,
             &sensor_peers,
             &mut sensor_controls,
             &mut next_control_sequence,
