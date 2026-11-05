@@ -45,4 +45,4 @@ Each message is `0x00 || COBS(payload || CRC16_BE) || 0x00`. CRC is CRC-16/CCITT
 
 Radio callbacks enqueue into a bounded queue and never write serial. Separate tasks handle each serial direction. Queues and USB buffers are bounded; when the host cannot keep up, packets are dropped and the firmware logs counters. A successful serial write or radio submission does not confirm end-to-end delivery.
 
-The full packet contract is in the system's documentation-only `protocol/protocol.md`.
+The full packet protocol is in the system's documentation-only `protocol/protocol.md`.

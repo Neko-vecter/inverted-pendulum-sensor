@@ -13,7 +13,7 @@ flowchart LR
     Server --> State["ID mapping, latest samples, rate/loss/latency"]
 ```
 
-The firmware, gateway and server build independently and implement their own transport code. The `protocol/` directory contains documentation only, including the wire contract and serial framing. The gateway does not rewrite sensor timestamps or identify nodes with its own MAC.
+The firmware, gateway and server build independently and implement their own transport code. The `protocol/` directory contains documentation only, including the wire protocol and serial framing. The gateway does not rewrite sensor timestamps or identify nodes with its own MAC.
 
 In the server configuration, `[server] mode = "espnow"` selects gateway serial and `[gateway] serial = "path"` selects the host device. `mode = "udp"` selects direct UDP. In sensor sdkconfig, `CONFIG_SENSOR_ESPNOW=y` is the default and excludes the Wi-Fi AP connection, reconnect task and UDP code; the Wi-Fi radio driver remains required by ESP-NOW.
 
@@ -42,7 +42,7 @@ flowchart TD
 - **Sensor driver:** Reads the raw 14-bit angle value from the MT6701 over I2C.
 - **Sampling task:** Uses a high-resolution timer for 10 Hz idle angle updates and switches to a 1 ms period for 1000 samples per second after a server start command.
 - **Sample queue:** Decouples sensor reads from transport submission. Samples can be dropped when the bounded queue fills or the selected transport is unavailable.
-- **Packet encoder:** Encodes samples and clock-sync messages using the version 3 contract in [`protocol/protocol.md`](../protocol/protocol.md). Samples carry a compact session token; clock metadata is sent only in low-rate sync exchanges.
+- **Packet encoder:** Encodes samples and clock-sync messages using the version 3 protocol in [`protocol/protocol.md`](../protocol/protocol.md). Samples carry a compact session token; clock metadata is sent only in low-rate sync exchanges.
 - **ESP-NOW transport:** Sends broadcasts on the configured channel and queues matching sync responses from the gateway. It needs the Wi-Fi radio driver, but does not start an access point connection, IP stack, or UDP application code.
 - **Optional UDP transport:** Connects to a configured access point, reconnects after disconnects, and sends packets to the configured server address.
 - **Clock-sync client:** Exchanges monotonic timestamps about once per second in both idle and active modes and reports the response receive timestamp to the server. The server retains the clock offset and round-trip time per device.

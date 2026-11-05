@@ -54,7 +54,7 @@ From this directory:
 cargo run --release -- --config config.toml
 ```
 
-The default config path is `config.toml`, so `cargo run --release` also works. The process prints one summary per configured device at the selected interval. Use `control + c` to stop it. The WebSocket API is available at `ws://<websocket_bind_address>/ws`; by default this is `ws://127.0.0.1:8765/ws`. Sensors sample at 10 Hz while idle. Send `{"type":"start"}` to begin 1 kHz measurement updates or `{"type":"stop"}` to return to idle sampling. The server retries each mode command every 50 ms until it receives a matching sensor acknowledgment. If sensor packets stop, clients receive a full-state refresh at 10 Hz. The server monitors the control connection and returns sensors to idle if it disconnects. See [`../protocol/sensor-data.md`](../protocol/sensor-data.md) for the message contract.
+The default config path is `config.toml`, so `cargo run --release` also works. The process prints one summary per configured device at the selected interval. Use `control + c` to stop it. The WebSocket API is available at `ws://<websocket_bind_address>/ws`; by default this is `ws://127.0.0.1:8765/ws`. Sensors sample at 10 Hz while idle. Send `{"type":"start"}` to begin 1 kHz measurement updates or `{"type":"stop"}` to return to idle sampling. The server retries each mode command every 50 ms until it receives a matching sensor acknowledgment. If sensor packets stop, clients receive a full-state refresh at 10 Hz. The server monitors the control connection and returns sensors to idle if it disconnects. See [`../protocol/sensor-data.md`](../protocol/sensor-data.md) for the message protocol.
 
 For UDP mode, allow incoming traffic on the configured port and configure each node with the server IPv4 address and port. For ESP-NOW mode, match the sensor and gateway radio channels (default 1), connect the gateway USB port, and keep other programs off that serial port.
 
@@ -76,7 +76,7 @@ cargo build
 
 ## Serial protocol
 
-The gateway and server independently implement the serial contract documented in `../protocol/protocol.md`: zero-delimited COBS frames and CRC-16/CCITT-FALSE around version 3 packets. The stream decoder accepts fragmented and concatenated frames, rejects CRC failures and oversized input, and resumes at the next delimiter. Time-sync responses use the same framing in the reverse direction. Framing rejection totals are printed separately from packet validation errors.
+The gateway and server independently implement the serial protocol documented in `../protocol/protocol.md`: zero-delimited COBS frames and CRC-16/CCITT-FALSE around version 3 packets. The stream decoder accepts fragmented and concatenated frames, rejects CRC failures and oversized input, and resumes at the next delimiter. Time-sync responses use the same framing in the reverse direction. Framing rejection totals are printed separately from packet validation errors.
 
 ```sh
 cargo test
