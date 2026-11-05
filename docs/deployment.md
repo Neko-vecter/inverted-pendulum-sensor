@@ -12,7 +12,7 @@ mode = "espnow"
 stats_interval_secs = 1
 
 [gateway]
-serial = "/dev/ttyACM0" # Prefer /dev/serial/by-id/...; Windows: "COM7".
+serial = "/dev/serial/by-id/xxx"
 ```
 
 Keep the `[devices]` sensor MAC mappings from the example. For direct Wi-Fi / UDP, set `server.mode = "udp"`, configure `server.bind_address`, and disable `CONFIG_SENSOR_ESPNOW` in the sensor sdkconfig before setting Wi-Fi credentials.
@@ -39,7 +39,7 @@ cargo run --release -- --config config.toml
 cargo build
 ```
 
-## ESP32 wireless sensor
+## ESP32 Wireless Sensor / ESP NOW Gateway
 
 ### Require Package
 

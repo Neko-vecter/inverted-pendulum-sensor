@@ -11,7 +11,7 @@ log_level = "info" # error, warn, info, debug, trace
 # Use a stable /dev/serial/by-id/... path on Linux, or e.g. "COM7" on Windows.
 # Set server.mode = "udp" to use Wi-Fi / UDP instead.
 [gateway]
-serial = "/dev/ttyACM0"
+serial = "/dev/serial/by-id/xxx"
 baud_rate = 921600 # Optional; match the gateway for an external UART adapter.
 
 # Map each sensor's Wi-Fi station MAC to its logical name.
