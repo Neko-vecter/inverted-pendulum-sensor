@@ -92,11 +92,11 @@ The sample packet is encoded field by field, without compiler padding.
 
 Total sample length is **20 bytes**.
 
-The MT6701 angle is a 14-bit unsigned count. For a valid reading, `angle_status[15:14]` is `00` and `angle_status[13:0]` contains 0 through 16,383. The sensor-data API converts it to radians and wraps it into `$[-\pi, \pi)$`, preserving the sensor's zero and positive direction without applying a zero-offset calibration. State `01` means I2C error and requires all lower angle bits to be zero. States `10` and `11` are reserved and rejected.
+The MT6701 angle is a 14-bit unsigned count. For a valid reading, `angle_status[15:14]` is `00` and `angle_status[13:0]` contains 0 through 16,383. The sensor-data API converts it to radians and wraps it into $[-\pi, \pi)$, preserving the sensor's zero and positive direction without applying a zero-offset calibration. State `01` means I2C error and requires all lower angle bits to be zero. States `10` and `11` are reserved and rejected.
 
 The assigned device ID identifies the sensor and maps to its configured logical device name. The station MAC is used only for registration and the registration response. The 32-bit sequence begins at zero after boot and advances for each sampling slot, including slots whose sample is not transmitted. The server uses modular differences to estimate packet loss; it cannot distinguish network loss from samples omitted by firmware.
 
-`timestamp_us` is the low 32 bits of the ESP32 monotonic microsecond timer, captured immediately before the MT6701 I2C read. It wraps every 2^32 microseconds (about 71 minutes 35 seconds). The latency metric includes I2C acquisition after this timestamp, firmware queueing, transport and server receive scheduling; it does not model MT6701 internal measurement delay.
+`timestamp_us` is the low 32 bits of the ESP32 monotonic microsecond timer, captured immediately before the MT6701 I2C read. It wraps every $2^{32}$ microseconds (about 71 minutes 35 seconds). The latency metric includes I2C acquisition after this timestamp, firmware queueing, transport and server receive scheduling; it does not model MT6701 internal measurement delay.
 
 The nonzero 32-bit `sync_token` changes when the server process starts. The server stores each device's offset and RTT after a completed time-sync exchange. A sample contributes latency only when its token matches the server's current token and a valid offset has been recorded. Token zero or a stale token is counted as unsynchronized. This also prevents buffered samples from a previous server session from being interpreted using a new offset.
 
@@ -144,7 +144,7 @@ Total report length is **22 bytes**. The server accepts a report only if it matc
 
 All time calculations use modulo-2^32 differences. Forward intervals must be less than 2^31 microseconds. The server computes:
 
-```text
+```rust
 device_elapsed = (device_t4_us - device_t1_us) mod 2^32
 server_elapsed = (server_t3_us - server_t2_us) mod 2^32
 round_trip_us = device_elapsed - server_elapsed
@@ -160,7 +160,7 @@ The server rejects exchanges with ambiguous elapsed intervals, a negative inferr
 
 For a sample whose `sync_token` matches the active server session and whose device has a valid offset:
 
-```text
+```rust
 mapped_sample_us = (timestamp_us + clock_offset_us) mod 2^32
 latency_us = (server_receive_us - mapped_sample_us) mod 2^32
 ```
