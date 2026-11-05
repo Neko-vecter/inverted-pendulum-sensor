@@ -2,7 +2,7 @@
 
 ## System Overview
 
-The system consists of ESP32 sensor nodes, each connected to an MT6701 magnetic angle sensor. Nodes sample at 10 Hz while idle and target 1000 samples per second during active measurement. ESP-NOW is the default transport. An ESP32-C6 gateway forwards packets over native USB serial to the Rust Sensor Server. Wi-Fi / UDP remains selectable in sensor sdkconfig and server configuration.
+The system consists of ESP32 sensor nodes, each connected to an MT6701 magnetic angle sensor. Nodes sample at 10 Hz while idle and target 1000 samples per second during active measurement. ESP-NOW is the default transport. An ESP32-C6 gateway forwards packets over native USB serial to the Rust Sensor Server. Wi-Fi / UDP remains selectable in sensor config and server configuration.
 
 ```mermaid
 flowchart LR
@@ -15,13 +15,13 @@ flowchart LR
 
 The firmware, gateway and server build independently and implement their own transport code. The `protocol/` directory contains documentation only, including the wire protocol and serial framing. The gateway does not rewrite sensor timestamps or identify nodes with its own MAC.
 
-In the server configuration, `[server] mode = "espnow"` selects gateway serial and `[gateway] serial = "path"` selects the host device. `mode = "udp"` selects direct UDP. In sensor sdkconfig, `CONFIG_SENSOR_ESPNOW=y` is the default and excludes the Wi-Fi AP connection, reconnect task and UDP code; the Wi-Fi radio driver remains required by ESP-NOW.
+In the server configuration, `[server] mode = "espnow"` selects gateway serial and `[gateway] serial = "path"` selects the host device. `mode = "udp"` selects direct UDP. In sensor config, `#define SENSOR_USE_ESPNOW 1` is the default and excludes the Wi-Fi AP connection, reconnect task and UDP code; the Wi-Fi radio driver remains required by ESP-NOW.
 
 The sections below describe each transport, the shared protocol, and the server's common state and statistics path.
 
 ## Sensor Firmware Architecture
 
-Each supported sensor board runs the same firmware. Its station MAC is used for startup registration; the server-assigned ID identifies it in later packets. A compile-time sdkconfig option selects ESP-NOW (the default) or Wi-Fi / UDP.
+Each supported sensor board runs the same firmware. Its station MAC is used for startup registration; the server-assigned ID identifies it in later packets. A compile-time config option selects ESP-NOW (the default) or Wi-Fi / UDP.
 
 ```mermaid
 flowchart TD
@@ -29,7 +29,7 @@ flowchart TD
     Driver --> Sampler["10 Hz idle / 1 kHz active sampling"]
     Sampler --> Queue["Bounded Sample Queue"]
     Queue --> Encoder["Version 3 Packet Encoder"]
-    Encoder --> Select{"Transport selected in sdkconfig"}
+    Encoder --> Select{"Transport selected in config.h"}
     Select -->|Default: ESP-NOW| Radio["Broadcast radio transport"]
     Radio <--> Gateway["ESP32-C6 gateway"]
     Gateway <-->|"Framed USB serial"| Server["Rust Sensor Server"]
